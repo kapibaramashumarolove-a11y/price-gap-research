@@ -20,6 +20,14 @@ npm run dev      # 開発用サーバーを起動
 
 入力したデータは、そのブラウザの中（localStorage）だけに保存されます。
 
+## eBay API キーの設定
+
+1. `.env.example` をコピーして `.env.local` を作ります（Windows: `copy .env.example .env.local` / Mac: `cp .env.example .env.local`）。
+2. `.env.local` をエディタで開き、`EBAY_CLIENT_ID=` と `EBAY_CLIENT_SECRET=` の右側に eBay で発行したキーを書いて保存します。
+3. `npm run dev` を起動し直します（起動中に書き換えた場合は `Ctrl + C` で止めてから再起動）。
+
+`.env.local` は `.gitignore` で除外されているため GitHub にはアップロードされません。キーをチャットやコードに直接書かないでください。
+
 ## 開発用コマンド
 
 | コマンド | 内容 |
