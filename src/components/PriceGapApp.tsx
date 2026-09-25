@@ -10,6 +10,7 @@ import {
   type Item,
   type Settings,
 } from "@/lib/profit";
+import EbayPriceLookup from "./EbayPriceLookup";
 
 const ITEMS_KEY = "price-gap:items";
 const SETTINGS_KEY = "price-gap:settings";
@@ -75,6 +76,8 @@ export default function PriceGapApp() {
     ) as Record<keyof Settings, string>,
   );
   const [form, setForm] = useState<ItemForm>(EMPTY_FORM);
+  // 追加するたびに増やし、eBay 検索欄（前の商品の検索結果）をリセットするために使う
+  const [formVersion, setFormVersion] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   // 変更があるたびに保存する
@@ -117,6 +120,7 @@ export default function PriceGapApp() {
       },
     ]);
     setForm(EMPTY_FORM);
+    setFormVersion((v) => v + 1);
     setError(null);
   }
 
@@ -131,8 +135,9 @@ export default function PriceGapApp() {
       <header className="space-y-2">
         <h1 className="text-2xl font-bold">スニダン → eBay 価格差リサーチ</h1>
         <p className="text-sm opacity-80">
-          スニダンで確認した仕入れ価格と、eBay での想定販売価格を手入力して利益を計算します。
+          スニダンで確認した仕入れ価格と、eBay での想定販売価格から利益を計算します。
           スニダンの情報は規約に従い、自動取得せずご自身で確認した値を入力してください。
+          eBay の価格は公式 API で出品中の価格を調べて入力することもできます。
         </p>
       </header>
 
@@ -190,6 +195,11 @@ export default function PriceGapApp() {
             type="number"
             value={form.ebayShippingChargedUsd}
             onChange={(v) => setForm({ ...form, ebayShippingChargedUsd: v })}
+          />
+          <EbayPriceLookup
+            key={formVersion}
+            defaultKeyword={form.sku.trim() || form.name.trim()}
+            onApplyPrice={(price) => setForm((prev) => ({ ...prev, ebayPriceUsd: String(price) }))}
           />
           <div className="flex items-center gap-3 sm:col-span-2 lg:col-span-4">
             <button
