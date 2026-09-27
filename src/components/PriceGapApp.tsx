@@ -11,6 +11,7 @@ import {
   type Settings,
 } from "@/lib/profit";
 import type { ActiveListingPrices } from "@/lib/ebay";
+import { conditionLabel } from "@/lib/ebayConditions";
 
 const ITEMS_KEY = "price-gap:items";
 const SETTINGS_KEY = "price-gap:settings";
@@ -235,7 +236,7 @@ export default function PriceGapApp() {
                 {market.status === "loading" ? "取得中…" : "eBay の出品中価格を取得"}
               </button>
               <span className="text-xs opacity-60">
-                型番（なければ商品名）とサイズで eBay 公式 Browse API を検索します（即決のみ・USD）。
+                型番（なければ商品名）とサイズで eBay 公式 Browse API を検索します（即決のみ・新品のみ・USD）。
               </span>
             </div>
             {market.status === "error" && <p className="text-red-600">{market.message}</p>}
@@ -377,7 +378,7 @@ function MarketResult({
             <UseButton onClick={() => onUse(data.min!)} />
           </span>
           <span className="text-xs opacity-60">
-            集計 {data.count} 件 / ヒット {data.total} 件
+            {conditionLabel(data.conditionIds)} / 集計 {data.count} 件 / ヒット {data.total} 件
           </span>
         </div>
       )}

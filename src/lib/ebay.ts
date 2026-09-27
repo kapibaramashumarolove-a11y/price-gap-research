@@ -2,6 +2,8 @@
 // キー（EBAY_CLIENT_SECRET など）を扱うので、ブラウザ側のコンポーネントからは import しないこと。
 // 画面からは /api/ebay/search を経由して呼び出す。
 
+import { DEFAULT_CONDITION_IDS } from "./ebayConditions";
+
 export type EbayEnvironment = "sandbox" | "production";
 
 export type EbayConfig = {
@@ -32,6 +34,8 @@ export type PriceSummary = {
 export type ActiveListingPrices = PriceSummary & {
   query: string;
   environment: EbayEnvironment;
+  /** 絞り込みに使ったコンディション ID（空配列なら絞り込みなし） */
+  conditionIds: string[];
   /** eBay 上でヒットした総件数（集計に使った件数より多いことがある） */
   total: number;
   fetchedAt: string;
@@ -166,15 +170,30 @@ export async function getAppAccessToken(
 
 // ---- 出品中の価格の検索 ----
 
+export type SearchOptions = {
+  /** 絞り込むコンディション ID（ebayConditions.ts 参照）。省略時は新品のみ、空配列なら絞り込みなし */
+  conditionIds?: readonly string[];
+};
+
+/** Browse API の filter パラメータを組み立てる */
+export function buildSearchFilter(conditionIds: readonly string[]): string {
+  const filters = ["buyingOptions:{FIXED_PRICE}", `priceCurrency:${CURRENCY}`];
+  if (conditionIds.length > 0) filters.push(`conditionIds:{${conditionIds.join("|")}}`);
+  return filters.join(",");
+}
+
 /**
  * キーワードで出品中（即決＝FIXED_PRICE）の商品を検索し、価格の中央値・最安値・件数を返す。
  * オークションは「現在の入札額」で実際の売値とかけ離れやすいため除外している。
+ * 商品の状態は既定で新品のみ（中古が混ざると中央値が大きく下がるため）。
  */
 export async function searchActiveListingPrices(
   query: string,
+  options: SearchOptions = {},
   config: EbayConfig = readEbayConfig(),
   fetchFn: typeof fetch = fetch,
 ): Promise<ActiveListingPrices> {
+  const conditionIds = [...(options.conditionIds ?? DEFAULT_CONDITION_IDS)];
   const q = query.trim();
   if (q === "") throw new EbayApiError("検索キーワードを入力してください。", 400);
 
@@ -183,7 +202,7 @@ export async function searchActiveListingPrices(
   const url = new URL(`${BASE_URLS[config.environment]}/buy/browse/v1/item_summary/search`);
   url.searchParams.set("q", q);
   url.searchParams.set("limit", String(SEARCH_LIMIT));
-  url.searchParams.set("filter", `buyingOptions:{FIXED_PRICE},priceCurrency:${CURRENCY}`);
+  url.searchParams.set("filter", buildSearchFilter(conditionIds));
 
   const res = await fetchFn(url, {
     headers: {
@@ -203,6 +222,7 @@ export async function searchActiveListingPrices(
   return {
     query: q,
     environment: config.environment,
+    conditionIds,
     total: data.total ?? items.length,
     ...summarizePrices(extractUsdPrices(items)),
     fetchedAt: new Date().toISOString(),

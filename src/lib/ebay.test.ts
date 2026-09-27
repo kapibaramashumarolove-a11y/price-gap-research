@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildSearchFilter,
   cleanEnvValue,
   clearTokenCache,
   extractUsdPrices,
@@ -120,12 +121,14 @@ describe("searchActiveListingPrices", () => {
 
     const result = await searchActiveListingPrices(
       " Nike Dunk ",
+      {},
       config,
       fetchFn as unknown as typeof fetch,
     );
     expect(result).toMatchObject({
       query: "Nike Dunk",
       environment: "sandbox",
+      conditionIds: ["1000"],
       total: 57,
       count: 3,
       median: 120,
@@ -139,7 +142,7 @@ describe("searchActiveListingPrices", () => {
     );
     expect(searchUrl.searchParams.get("q")).toBe("Nike Dunk");
     expect(searchUrl.searchParams.get("filter")).toBe(
-      "buyingOptions:{FIXED_PRICE},priceCurrency:USD",
+      "buyingOptions:{FIXED_PRICE},priceCurrency:USD,conditionIds:{1000}",
     );
     expect(calls[1].init?.headers).toMatchObject({
       Authorization: "Bearer tok",
@@ -148,6 +151,18 @@ describe("searchActiveListingPrices", () => {
   });
 
   it("空のキーワードはエラー", async () => {
-    await expect(searchActiveListingPrices("  ", config, vi.fn())).rejects.toThrow(/キーワード/);
+    await expect(searchActiveListingPrices("  ", {}, config, vi.fn())).rejects.toThrow(/キーワード/);
+  });
+});
+
+describe("buildSearchFilter", () => {
+  it("コンディションを複数指定すると | でつなぐ", () => {
+    expect(buildSearchFilter(["1000", "3000"])).toBe(
+      "buyingOptions:{FIXED_PRICE},priceCurrency:USD,conditionIds:{1000|3000}",
+    );
+  });
+
+  it("空配列なら状態で絞り込まない", () => {
+    expect(buildSearchFilter([])).toBe("buyingOptions:{FIXED_PRICE},priceCurrency:USD");
   });
 });

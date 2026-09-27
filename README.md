@@ -40,16 +40,28 @@ NODE_USE_ENV_PROXY=1 npm run dev
 ## eBay の相場取得の使い方
 
 1. 「仕入れ候補を追加」で型番（なければ商品名）とサイズを入力します。
-2. 「eBay の出品中価格を取得」を押すと、米国 eBay（USD）の即決出品を最大 100 件検索し、中央値・最安値・件数を表示します。
+2. 「eBay の出品中価格を取得」を押すと、米国 eBay（USD）の**新品**の即決出品を最大 100 件検索し、中央値・最安値・件数を表示します。
 3. 「販売価格に使う」を押すと、その値が「eBay 販売価格 (USD)」に入ります。
 
-オークション出品は「現在の入札額」が実際の売値とかけ離れやすいので除外しています。出品中の価格であり、実際に売れた価格ではない点に注意してください。
+オークション出品は「現在の入札額」が実際の売値とかけ離れやすいので除外しています。中古が混ざると中央値が大きく下がるため、既定では新品（コンディション ID `1000`）だけに絞っています。出品中の価格であり、実際に売れた価格ではない点に注意してください。
 
 サーバーの API は `GET /api/ebay/search?q=キーワード` で、次のような JSON を返します。
 
 ```json
-{ "query": "nike", "environment": "sandbox", "total": 302, "count": 100, "median": 24.99, "min": 9.99, "fetchedAt": "..." }
+{ "query": "nike", "environment": "production", "conditionIds": ["1000"], "total": 302, "count": 100, "median": 24.99, "min": 9.99, "fetchedAt": "..." }
 ```
+
+商品の状態は `condition` で変えられます（カンマ区切りで複数可）。使える ID と画面用の名前は `src/lib/ebayConditions.ts` にまとめてあり、将来ここから画面の選択肢を作れます。
+
+| 指定 | 意味 |
+|---|---|
+| なし | 新品のみ（`1000`） |
+| `&condition=1000,1500` | 新品＋新品（その他・箱なし等） |
+| `&condition=3000` | 中古 |
+| `&condition=2750,4000` | トレーディングカード（ポケモンカードなど）の鑑定済み＋未鑑定 |
+| `&condition=all` | 状態で絞り込まない |
+
+同じ ID でもカテゴリによって意味が変わるものがあります（例：トレーディングカードでは `2750` が鑑定済み、`4000` が未鑑定）。
 
 `.env.local` は `.gitignore` で除外されているため GitHub にはアップロードされません。キーをチャットやコードに直接書かないでください。
 
@@ -71,6 +83,8 @@ NODE_USE_ENV_PROXY=1 npm run dev
 | `src/lib/profit.test.ts` | 利益計算のテスト |
 | `src/lib/ebay.ts` | eBay Browse API の呼び出しと価格の集計（サーバー専用） |
 | `src/lib/ebay.test.ts` | eBay 連携のテスト（通信はダミー） |
+| `src/lib/ebayConditions.ts` | eBay の商品状態（コンディション ID）の一覧と既定値（新品） |
+| `src/lib/ebayConditions.test.ts` | コンディション指定のテスト |
 | `src/app/api/ebay/search/route.ts` | 画面から呼ぶ API（`/api/ebay/search`） |
 | `src/components/PriceGapApp.tsx` | 画面本体（入力フォーム・計算条件・結果一覧） |
 | `src/components/ClientOnlyApp.tsx` | 画面をブラウザだけで表示するための入れ物 |
