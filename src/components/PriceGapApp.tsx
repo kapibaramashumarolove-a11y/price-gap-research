@@ -10,6 +10,7 @@ import {
   type Item,
   type Settings,
 } from "@/lib/profit";
+import type { ActiveListingPrices } from "@/lib/ebay";
 
 const ITEMS_KEY = "price-gap:items";
 const SETTINGS_KEY = "price-gap:settings";
@@ -33,6 +34,12 @@ const SETTING_FIELDS: { key: keyof Settings; label: string; unit: string }[] = [
   { key: "perOrderFeeUsd", label: "1注文あたり固定手数料", unit: "USD" },
   { key: "internationalShippingJpy", label: "国際送料", unit: "円" },
 ];
+
+type MarketState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "done"; data: ActiveListingPrices };
 
 const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY" });
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -76,6 +83,7 @@ export default function PriceGapApp() {
   );
   const [form, setForm] = useState<ItemForm>(EMPTY_FORM);
   const [error, setError] = useState<string | null>(null);
+  const [market, setMarket] = useState<MarketState>({ status: "idle" });
 
   // 変更があるたびに保存する
   useEffect(() => saveJson(ITEMS_KEY, items), [items]);
@@ -118,6 +126,30 @@ export default function PriceGapApp() {
     ]);
     setForm(EMPTY_FORM);
     setError(null);
+    setMarket({ status: "idle" });
+  }
+
+  /** eBay の出品中価格をサーバー経由（/api/ebay/search）で取得する。キーワードは型番優先、なければ商品名 */
+  async function handleFetchMarket() {
+    const q = [form.sku.trim() || form.name.trim(), form.size.trim() && `size ${form.size.trim()}`]
+      .filter(Boolean)
+      .join(" ");
+    if (!form.sku.trim() && !form.name.trim()) {
+      setMarket({ status: "error", message: "型番か商品名を入力してから取得してください。" });
+      return;
+    }
+    setMarket({ status: "loading" });
+    try {
+      const res = await fetch(`/api/ebay/search?q=${encodeURIComponent(q)}`);
+      const body = await res.json();
+      if (!res.ok) {
+        setMarket({ status: "error", message: body.error ?? `取得に失敗しました（HTTP ${res.status}）。` });
+        return;
+      }
+      setMarket({ status: "done", data: body as ActiveListingPrices });
+    } catch {
+      setMarket({ status: "error", message: "サーバーに接続できませんでした。" });
+    }
   }
 
   function handleSettingChange(key: keyof Settings, value: string) {
@@ -131,7 +163,8 @@ export default function PriceGapApp() {
       <header className="space-y-2">
         <h1 className="text-2xl font-bold">スニダン → eBay 価格差リサーチ</h1>
         <p className="text-sm opacity-80">
-          スニダンで確認した仕入れ価格と、eBay での想定販売価格を手入力して利益を計算します。
+          スニダンで確認した仕入れ価格と、eBay での想定販売価格から利益を計算します。
+          eBay の価格は公式 Browse API で出品中の相場を取得するか、手入力できます。
           スニダンの情報は規約に従い、自動取得せずご自身で確認した値を入力してください。
         </p>
       </header>
@@ -191,6 +224,28 @@ export default function PriceGapApp() {
             value={form.ebayShippingChargedUsd}
             onChange={(v) => setForm({ ...form, ebayShippingChargedUsd: v })}
           />
+          <div className="space-y-2 rounded border border-dashed border-black/20 p-3 text-sm sm:col-span-2 lg:col-span-4 dark:border-white/25">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleFetchMarket}
+                disabled={market.status === "loading"}
+                className="rounded border border-black/30 px-3 py-1 hover:bg-black/5 disabled:opacity-50 dark:border-white/30 dark:hover:bg-white/10"
+              >
+                {market.status === "loading" ? "取得中…" : "eBay の出品中価格を取得"}
+              </button>
+              <span className="text-xs opacity-60">
+                型番（なければ商品名）とサイズで eBay 公式 Browse API を検索します（即決のみ・USD）。
+              </span>
+            </div>
+            {market.status === "error" && <p className="text-red-600">{market.message}</p>}
+            {market.status === "done" && (
+              <MarketResult
+                data={market.data}
+                onUse={(price) => setForm({ ...form, ebayPriceUsd: String(price) })}
+              />
+            )}
+          </div>
           <div className="flex items-center gap-3 sm:col-span-2 lg:col-span-4">
             <button
               type="submit"
@@ -289,5 +344,51 @@ function TextField({
         className="rounded border border-black/20 bg-transparent px-2 py-1 dark:border-white/25"
       />
     </label>
+  );
+}
+
+function MarketResult({
+  data,
+  onUse,
+}: {
+  data: ActiveListingPrices;
+  onUse: (priceUsd: number) => void;
+}) {
+  return (
+    <div className="space-y-1">
+      <p>
+        「{data.query}」の出品中価格：
+        {data.environment === "sandbox" && (
+          <span className="ml-2 rounded bg-yellow-200 px-1 text-xs text-black">
+            Sandbox（テスト用データ）
+          </span>
+        )}
+      </p>
+      {data.count === 0 ? (
+        <p className="opacity-70">該当する出品が見つかりませんでした。キーワードを変えてみてください。</p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span>
+            中央値 <strong>{usd.format(data.median!)}</strong>
+            <UseButton onClick={() => onUse(data.median!)} />
+          </span>
+          <span>
+            最安値 <strong>{usd.format(data.min!)}</strong>
+            <UseButton onClick={() => onUse(data.min!)} />
+          </span>
+          <span className="text-xs opacity-60">
+            集計 {data.count} 件 / ヒット {data.total} 件
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UseButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className="ml-1 text-xs underline opacity-70 hover:opacity-100">
+      販売価格に使う
+    </button>
   );
 }

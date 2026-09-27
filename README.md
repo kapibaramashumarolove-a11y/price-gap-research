@@ -3,7 +3,7 @@
 スニダン（SNKRDUNK）で仕入れて eBay で販売した場合の利益を計算する Web アプリです。
 
 - スニダンの情報は、利用規約（クローリング・スクレイピングの禁止）に従い **自動取得しません**。スニダンで確認した価格を手入力します。
-- eBay の価格は現在は手入力です。今後、公式の Browse API で取得できるようにする予定です。
+- eBay の価格は、公式の [Browse API](https://developer.ebay.com/api-docs/buy/browse/overview.html) で「出品中（即決）の価格」の中央値・最安値・件数を取得して使えます（手入力も可）。API はサーバー側だけで呼び出し、キーはブラウザに送りません。
 
 ## 必要なもの
 
@@ -26,6 +26,31 @@ npm run dev      # 開発用サーバーを起動
 2. `.env.local` をエディタで開き、`EBAY_CLIENT_ID=` と `EBAY_CLIENT_SECRET=` の右側に eBay で発行したキーを書いて保存します。
 3. `npm run dev` を起動し直します（起動中に書き換えた場合は `Ctrl + C` で止めてから再起動）。
 
+- `EBAY_ENVIRONMENT` は `sandbox`（テスト用）か `production`（本番）です。Sandbox のキー（Secret が `SBX-` で始まる）は `sandbox`、本番のキーは `production` と組み合わせてください。Sandbox で返ってくる商品・価格はテスト用のデータです。
+- キーをコピー＆ペーストしたときに、目に見えない文字（ゼロ幅スペースなど）や前後の空白が紛れ込むことがあります。アプリ側で自動的に取り除きますが、認証に失敗する場合は貼り直してみてください。
+
+### プロキシ環境で動かす場合
+
+社内ネットワークなど HTTP プロキシ（`HTTPS_PROXY` 環境変数）経由でしか外に出られない環境では、Node.js の `fetch` がプロキシを使うように `NODE_USE_ENV_PROXY=1` を付けて起動します（Node.js 22.21 以上）。
+
+```bash
+NODE_USE_ENV_PROXY=1 npm run dev
+```
+
+## eBay の相場取得の使い方
+
+1. 「仕入れ候補を追加」で型番（なければ商品名）とサイズを入力します。
+2. 「eBay の出品中価格を取得」を押すと、米国 eBay（USD）の即決出品を最大 100 件検索し、中央値・最安値・件数を表示します。
+3. 「販売価格に使う」を押すと、その値が「eBay 販売価格 (USD)」に入ります。
+
+オークション出品は「現在の入札額」が実際の売値とかけ離れやすいので除外しています。出品中の価格であり、実際に売れた価格ではない点に注意してください。
+
+サーバーの API は `GET /api/ebay/search?q=キーワード` で、次のような JSON を返します。
+
+```json
+{ "query": "nike", "environment": "sandbox", "total": 302, "count": 100, "median": 24.99, "min": 9.99, "fetchedAt": "..." }
+```
+
 `.env.local` は `.gitignore` で除外されているため GitHub にはアップロードされません。キーをチャットやコードに直接書かないでください。
 
 ## 開発用コマンド
@@ -33,7 +58,7 @@ npm run dev      # 開発用サーバーを起動
 | コマンド | 内容 |
 |---|---|
 | `npm run dev` | 開発用サーバーを起動（ファイルを保存すると自動で反映） |
-| `npm test` | 利益計算のテストを実行 |
+| `npm test` | 利益計算・eBay 連携のテストを実行 |
 | `npm run lint` | コードの書き方をチェック |
 | `npm run typecheck` | 型のチェック |
 | `npm run build` | 本番用にビルド |
@@ -44,6 +69,9 @@ npm run dev      # 開発用サーバーを起動
 |---|---|
 | `src/lib/profit.ts` | 利益計算のロジック |
 | `src/lib/profit.test.ts` | 利益計算のテスト |
+| `src/lib/ebay.ts` | eBay Browse API の呼び出しと価格の集計（サーバー専用） |
+| `src/lib/ebay.test.ts` | eBay 連携のテスト（通信はダミー） |
+| `src/app/api/ebay/search/route.ts` | 画面から呼ぶ API（`/api/ebay/search`） |
 | `src/components/PriceGapApp.tsx` | 画面本体（入力フォーム・計算条件・結果一覧） |
 | `src/components/ClientOnlyApp.tsx` | 画面をブラウザだけで表示するための入れ物 |
 | `src/app/page.tsx` | トップページ（`/`） |
