@@ -4,10 +4,15 @@
 // eBay のキーはサーバーの中だけで使い、ブラウザには返さない。
 
 import type { NextRequest } from "next/server";
+import { AUTH_COOKIE, isAuthenticated } from "@/lib/auth";
 import { EbayApiError, searchActiveListingPrices } from "@/lib/ebay";
 import { parseConditionIds } from "@/lib/ebayConditions";
 
 export async function GET(request: NextRequest) {
+  // proxy.ts でも確認しているが、eBay の利用枠を守るためここでも確認する
+  if (!isAuthenticated(request.cookies.get(AUTH_COOKIE)?.value)) {
+    return Response.json({ error: "ログインが必要です。" }, { status: 401 });
+  }
   const q = request.nextUrl.searchParams.get("q") ?? "";
   if (q.trim() === "") {
     return Response.json({ error: "検索キーワード (q) を指定してください。" }, { status: 400 });

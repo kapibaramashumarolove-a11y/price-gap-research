@@ -37,6 +37,32 @@ npm run dev      # 開発用サーバーを起動
 NODE_USE_ENV_PROXY=1 npm run dev
 ```
 
+## 合言葉（ログイン）
+
+URL を知っている第三者に eBay API の利用枠を使われないよう、サイトを開くと合言葉を求めます。合言葉は環境変数 `APP_PASSWORD` で設定します。
+
+- 合言葉が合うと、そのブラウザは 30 日間ログインしたままになります。右上の「ログアウト」で解除できます。
+- `APP_PASSWORD` を変えると、それまでログインしていたブラウザはすべてログアウトされます。
+- 同じ接続元から 5 回まちがえると、15 分間ログインできなくなります（簡易的な総当たり対策）。
+- **本番で `APP_PASSWORD` が未設定だと、安全のためサイトも API も使えない状態になります**（エラー表示）。`npm run dev` では未設定ならログインなしで使えます。
+- 4 桁の PIN のような短い合言葉は総当たりで破られやすいので、12 文字以上をおすすめします。
+
+## Vercel で公開する（スマホで使う）
+
+1. [Vercel](https://vercel.com) に GitHub アカウントでログインし、「Add New → Project」でこのリポジトリを Import します。
+2. 「Environment Variables」に次の 4 つを登録します。
+
+   | 名前 | 値 |
+   |---|---|
+   | `EBAY_CLIENT_ID` | 本番用の App ID |
+   | `EBAY_CLIENT_SECRET` | 本番用の Cert ID（`PRD-` で始まる） |
+   | `EBAY_ENVIRONMENT` | `production` |
+   | `APP_PASSWORD` | 自分で決めた合言葉 |
+
+3. 「Deploy」を押すと `https://〇〇.vercel.app` の URL ができます。スマホで開き、合言葉を入力します。
+
+`NODE_USE_ENV_PROXY` は Vercel では不要です。環境変数を後から変えたときは、Deployments 画面から「Redeploy」すると反映されます。
+
 ## eBay の相場取得の使い方
 
 1. 「仕入れ候補を追加」で型番（なければ商品名）とサイズを入力します。
@@ -86,7 +112,12 @@ NODE_USE_ENV_PROXY=1 npm run dev
 | `src/lib/ebayConditions.ts` | eBay の商品状態（コンディション ID）の一覧と既定値（新品） |
 | `src/lib/ebayConditions.test.ts` | コンディション指定のテスト |
 | `src/app/api/ebay/search/route.ts` | 画面から呼ぶ API（`/api/ebay/search`） |
-| `src/components/PriceGapApp.tsx` | 画面本体（入力フォーム・計算条件・結果一覧） |
+| `src/lib/auth.ts` | 合言葉のチェックとログイン用 Cookie（サーバー専用） |
+| `src/lib/auth.test.ts` | 合言葉まわりのテスト |
+| `src/proxy.ts` | 全ページ・API の前でログイン済みかを確認する |
+| `src/app/login/page.tsx` | ログイン画面（`/login`） |
+| `src/app/api/login/route.ts` / `src/app/api/logout/route.ts` | ログイン・ログアウトの処理 |
+| `src/components/PriceGapApp.tsx` | 画面本体（入力フォーム・計算条件・結果一覧。スマホではカード表示） |
 | `src/components/ClientOnlyApp.tsx` | 画面をブラウザだけで表示するための入れ物 |
 | `src/app/page.tsx` | トップページ（`/`） |
 | `src/app/layout.tsx` | 全ページ共通の枠（タイトルなど） |
