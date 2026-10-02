@@ -71,19 +71,20 @@ export function rakutenSiteOrigin(siteOrigin: string | undefined, env: Record<st
   }
 }
 
-/** 楽天のエラーを、直し方が分かる日本語にする */
+/** 楽天のエラーを、直し方が分かる日本語にする（楽天の「許可されたWebサイト」と見比べられるよう、送った URL も添える） */
 function rakutenErrorMessage(status: number, detail: string, origin: string | undefined): string {
   if (status === 429) return "楽天: アクセスが多すぎます。少し待ってからもう一度試してください。";
+  const sent = `［HTTP ${status}・楽天に送ったサイト URL: ${origin ?? "なし"}］`;
   if (/access ?key/i.test(detail)) {
-    return `楽天: アクセスキーが正しくありません（${detail}）。RAKUTEN_ACCESS_KEY が、RAKUTEN_APP_ID と同じアプリのアクセスキーか確認してください。`;
+    return `楽天: アクセスキーが正しくありません（${detail}）。RAKUTEN_ACCESS_KEY が、RAKUTEN_APP_ID と同じアプリのアクセスキーか確認してください。${sent}`;
   }
   if (/applicationId/i.test(detail)) {
-    return `楽天: アプリ ID が正しくありません（${detail}）。2026 年の新しい楽天ウェブサービスで登録したアプリのアプリケーション ID を RAKUTEN_APP_ID に設定してください。`;
+    return `楽天: アプリ ID が正しくありません（${detail}）。2026 年の新しい楽天ウェブサービスで登録したアプリのアプリケーション ID を RAKUTEN_APP_ID に設定してください。${sent}`;
   }
   if (/refer|origin|domain|site/i.test(detail) || status === 403) {
-    return `楽天: アクセスが拒否されました（${detail}）。楽天のアプリ設定の「許可されたWebサイト」に ${origin ?? "このサイトの URL"} を登録しているか確認してください。`;
+    return `楽天: アクセスが拒否されました（${detail}）。楽天のアプリ設定の「許可されたWebサイト」に ${origin ?? "このサイトの URL"} を登録しているか確認してください。${sent}`;
   }
-  return `楽天: 検索に失敗しました（${detail}）。`;
+  return `楽天: 検索に失敗しました（${detail}）。${sent}`;
 }
 
 export async function searchRakuten(
