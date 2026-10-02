@@ -12,9 +12,11 @@ import {
 } from "@/lib/profit";
 import type { ActiveListingPrices } from "@/lib/ebay";
 import { conditionLabel } from "@/lib/ebayConditions";
+import { loadJson, saveJson, SETTINGS_KEY } from "@/lib/browserStorage";
+import AppNav from "./AppNav";
+import { NumberField, TextField } from "./Fields";
 
 const ITEMS_KEY = "price-gap:items";
-const SETTINGS_KEY = "price-gap:settings";
 
 type ItemForm = Record<Exclude<keyof Item, "id">, string>;
 
@@ -44,23 +46,6 @@ type MarketState =
 
 const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY" });
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
-
-function loadJson<T>(key: string): T | null {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveJson(key: string, value: unknown) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // 保存できない環境（プライベートモード等）でも画面は動かす
-  }
-}
 
 /** 0 以上の数値として読めれば数値、読めなければ null */
 function toNonNegativeNumber(value: string): number | null {
@@ -172,15 +157,9 @@ export default function PriceGapApp() {
 
   return (
     <main className="mx-auto w-full max-w-5xl space-y-6 px-4 pt-4 pb-[calc(2rem+env(safe-area-inset-bottom))] sm:space-y-8 sm:py-8">
+      <AppNav current="/" />
       <header className="space-y-2">
-        <div className="flex items-start justify-between gap-3">
-          <h1 className="text-xl font-bold sm:text-2xl">スニダン → eBay 価格差リサーチ</h1>
-          <form method="post" action="/api/logout" className="shrink-0">
-            <button type="submit" className="min-h-11 px-2 text-sm underline opacity-70 active:opacity-100">
-              ログアウト
-            </button>
-          </form>
-        </div>
+        <h1 className="text-xl font-bold sm:text-2xl">スニダン → eBay 価格差リサーチ</h1>
         <p className="text-sm opacity-80">
           スニダンで確認した仕入れ価格と、eBay での想定販売価格から利益を計算します。
           <span className="hidden sm:inline">
@@ -387,52 +366,6 @@ export default function PriceGapApp() {
 
 function profitColor(profitJpy: number): string {
   return profitJpy >= 0 ? "text-green-600" : "text-red-600";
-}
-
-/** 入力欄の共通の見た目。16px 以上の文字にして、iPhone で入力時に画面が拡大されないようにする */
-const INPUT_CLASS =
-  "h-12 w-full rounded-lg border border-black/20 bg-transparent px-3 text-base dark:border-white/25";
-
-function TextField({
-  label,
-  value,
-  onChange,
-}: {
-  label: React.ReactNode;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="flex min-w-0 flex-col gap-1 text-sm">
-      <span>{label}</span>
-      <input type="text" value={value} onChange={(e) => onChange(e.target.value)} className={INPUT_CLASS} />
-    </label>
-  );
-}
-
-/** 数値の入力欄。スマホでは小数点つきの数字キーボードを出す（値のチェックは保存時に行う） */
-function NumberField({
-  label,
-  value,
-  onChange,
-}: {
-  label: React.ReactNode;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="flex min-w-0 flex-col gap-1 text-sm">
-      <span>{label}</span>
-      <input
-        type="text"
-        inputMode="decimal"
-        autoComplete="off"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={INPUT_CLASS}
-      />
-    </label>
-  );
 }
 
 function MarketResult({

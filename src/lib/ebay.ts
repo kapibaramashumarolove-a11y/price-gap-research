@@ -182,27 +182,38 @@ export function buildSearchFilter(conditionIds: readonly string[]): string {
   return filters.join(",");
 }
 
-/**
- * キーワードで出品中（即決＝FIXED_PRICE）の商品を検索し、価格の中央値・最安値・件数を返す。
- * オークションは「現在の入札額」で実際の売値とかけ離れやすいため除外している。
- * 商品の状態は既定で新品のみ（中古が混ざると中央値が大きく下がるため）。
- */
-export async function searchActiveListingPrices(
-  query: string,
-  options: SearchOptions = {},
+export type ListingSearchParams = {
+  /** 検索キーワード（gtin を指定する場合は省略可） */
+  q?: string;
+  /** JAN / UPC / EAN コード。eBay の商品カタログに紐づく出品だけに絞り込める */
+  gtin?: string;
+  /** 絞り込むコンディション ID。空配列なら絞り込みなし */
+  conditionIds: readonly string[];
+};
+
+export type ListingSearchResult = {
+  /** eBay 上でヒットした総件数 */
+  total: number;
+  items: EbayItemSummary[];
+};
+
+/** Browse API の item_summary/search を 1 回呼ぶ（即決・USD のみ） */
+export async function searchEbayListings(
+  params: ListingSearchParams,
   config: EbayConfig = readEbayConfig(),
   fetchFn: typeof fetch = fetch,
-): Promise<ActiveListingPrices> {
-  const conditionIds = [...(options.conditionIds ?? DEFAULT_CONDITION_IDS)];
-  const q = query.trim();
-  if (q === "") throw new EbayApiError("検索キーワードを入力してください。", 400);
+): Promise<ListingSearchResult> {
+  const q = params.q?.trim() ?? "";
+  const gtin = params.gtin?.trim() ?? "";
+  if (q === "" && gtin === "") throw new EbayApiError("検索キーワードを入力してください。", 400);
 
   const token = await getAppAccessToken(config, fetchFn);
 
   const url = new URL(`${BASE_URLS[config.environment]}/buy/browse/v1/item_summary/search`);
-  url.searchParams.set("q", q);
+  if (q) url.searchParams.set("q", q);
+  if (gtin) url.searchParams.set("gtin", gtin);
   url.searchParams.set("limit", String(SEARCH_LIMIT));
-  url.searchParams.set("filter", buildSearchFilter(conditionIds));
+  url.searchParams.set("filter", buildSearchFilter(params.conditionIds));
 
   const res = await fetchFn(url, {
     headers: {
@@ -219,11 +230,30 @@ export async function searchActiveListingPrices(
 
   const data = (await res.json()) as { total?: number; itemSummaries?: EbayItemSummary[] };
   const items = data.itemSummaries ?? [];
+  return { total: data.total ?? items.length, items };
+}
+
+/**
+ * キーワードで出品中（即決＝FIXED_PRICE）の商品を検索し、価格の中央値・最安値・件数を返す。
+ * オークションは「現在の入札額」で実際の売値とかけ離れやすいため除外している。
+ * 商品の状態は既定で新品のみ（中古が混ざると中央値が大きく下がるため）。
+ */
+export async function searchActiveListingPrices(
+  query: string,
+  options: SearchOptions = {},
+  config: EbayConfig = readEbayConfig(),
+  fetchFn: typeof fetch = fetch,
+): Promise<ActiveListingPrices> {
+  const conditionIds = [...(options.conditionIds ?? DEFAULT_CONDITION_IDS)];
+  const q = query.trim();
+  if (q === "") throw new EbayApiError("検索キーワードを入力してください。", 400);
+
+  const { total, items } = await searchEbayListings({ q, conditionIds }, config, fetchFn);
   return {
     query: q,
     environment: config.environment,
     conditionIds,
-    total: data.total ?? items.length,
+    total,
     ...summarizePrices(extractUsdPrices(items)),
     fetchedAt: new Date().toISOString(),
   };

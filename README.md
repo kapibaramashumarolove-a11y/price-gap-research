@@ -1,6 +1,9 @@
 # price-gap-research
 
-スニダン（SNKRDUNK）で仕入れて eBay で販売した場合の利益を計算する Web アプリです。
+スニダン（SNKRDUNK）や楽天・Yahoo!ショッピングで仕入れて eBay で販売した場合の利益を計算する Web アプリです。
+
+- **自動リサーチ**（`/research`）: 楽天・Yahoo! の商品を公式 API で一括取得し、JAN コードやカード番号で同じ商品を見分けて eBay の相場と照合し、利益の条件を満たす「お宝商品」を一覧にします。
+- **手入力で計算**（`/`）: スニダンで確認した価格などを手入力して利益を計算します。
 
 - スニダンの情報は、利用規約（クローリング・スクレイピングの禁止）に従い **自動取得しません**。スニダンで確認した価格を手入力します。
 - eBay の価格は、公式の [Browse API](https://developer.ebay.com/api-docs/buy/browse/overview.html) で「出品中（即決）の価格」の中央値・最安値・件数を取得して使えます（手入力も可）。API はサーバー側だけで呼び出し、キーはブラウザに送りません。
@@ -50,7 +53,7 @@ URL を知っている第三者に eBay API の利用枠を使われないよう
 ## Vercel で公開する（スマホで使う）
 
 1. [Vercel](https://vercel.com) に GitHub アカウントでログインし、「Add New → Project」でこのリポジトリを Import します。
-2. 「Environment Variables」に次の 4 つを登録します。
+2. 「Environment Variables」に次の値を登録します。
 
    | 名前 | 値 |
    |---|---|
@@ -58,10 +61,62 @@ URL を知っている第三者に eBay API の利用枠を使われないよう
    | `EBAY_CLIENT_SECRET` | 本番用の Cert ID（`PRD-` で始まる） |
    | `EBAY_ENVIRONMENT` | `production` |
    | `APP_PASSWORD` | 自分で決めた合言葉 |
+   | `RAKUTEN_APP_ID` | 楽天のアプリ ID（自動リサーチ用） |
+   | `YAHOO_CLIENT_ID` | Yahoo! の Client ID（自動リサーチ用） |
 
 3. 「Deploy」を押すと `https://〇〇.vercel.app` の URL ができます。スマホで開き、合言葉を入力します。
 
 `NODE_USE_ENV_PROXY` は Vercel では不要です。環境変数を後から変えたときは、Deployments 画面から「Redeploy」すると反映されます。
+
+## 自動リサーチ（楽天・Yahoo! × eBay）
+
+画面上部の「自動リサーチ」タブで使います。
+
+### 流れ
+
+1. **国内の商品を取得**: 検索条件（プリセット）ごとに、楽天市場（最大 30 件）と Yahoo!ショッピング（最大 50 件・在庫ありのみ）を公式 API で検索します。
+2. **除外**: オリパ・くじ・ローダーなどの周辺グッズ・予約品は最初から除外します。未開封BOX ではさらに、開封済み・シュリンクなし・訳あり・2BOX などの複数箱・1 パックだけの出品も除外します。検索条件ごとに除外ワードを追加できます。
+3. **同じ商品を見分ける**（種類ごとに方法が違います）
+
+   | 種類 | 識別のしかた | eBay の検索 |
+   |---|---|---|
+   | 未開封BOX | JAN コード（Yahoo! は API の JAN、楽天は商品名・説明文から抽出。チェックデジットも確認） | JAN（GTIN）で検索、新品のみ |
+   | PSA10 | カード番号（例: `205/172`、プロモ `001/SV-P`）＋ PSA10 の表記 | 「`205/172 PSA 10 japanese`」、鑑定済み（`2750`） |
+   | シングル（未鑑定） | カード番号（鑑定品は除外） | 「`205/172 japanese`」、未鑑定（`4000`） |
+   | その他 | JAN コード、なければ型番（例: `DD1391-100`） | JAN または型番、新品のみ |
+
+   カード番号はタイトルからだけ取り出します（説明文には関連する別カードの番号が書かれていることがあるため）。識別できなかった商品は eBay と照合しません。
+4. **eBay の相場**: まとめた商品ごとに eBay を検索し、タイトルを確認して別の商品（カード番号違い・PSA9・カスタム品・1 パックだけ・複数箱・他の言語版など）を除いてから、最安値・安い方から 25%・中央値を出します。同じ検索は 30 分間使い回し、1 回のリサーチで調べる商品数にも上限（初期値 15、最大 30）をかけて API の利用回数を抑えます。
+5. **利益の計算**（画面側で計算するので、条件を変えてもすぐに再計算されます）
+
+   ```
+   利益 = (eBay 売価 − eBay 手数料) × 為替 − (国内最安値 + 国内送料) − 国際送料
+   ```
+
+   - eBay 売価: 「お宝の条件」で選んだ値（初期値は安い方から 25%。出品中価格の中央値は実際に売れる価格より高めに出やすいため）
+   - 国内最安値: 楽天・Yahoo! のうち送料込みで一番安いもの。送料別・条件付きの場合は「送料別のときの国内送料」（初期値 800 円）を足します
+   - 為替・eBay 手数料: 「手入力で計算」の計算条件と共通
+   - 国際送料: 検索条件ごとに設定（初期値: BOX 3,000 円・PSA10 2,000 円・シングル 1,500 円）
+6. **お宝の判定**: 利益（初期値 3,000 円以上）・利益率（15% 以上）・eBay の比較件数（3 件以上。少ないと相場が当てにならないため）をすべて満たすもの。各商品には楽天・Yahoo! の購入リンク、eBay の出品中・落札済みの検索リンクを付けています。
+
+### 注意
+
+- **eBay の落札履歴（Sold）は API では取得できません。** 落札データの API（Marketplace Insights API）は eBay の審査が必要で、このアプリのキーでは使えません（`invalid_scope`）。相場は出品中（即決）の価格で、各商品の「eBay 落札済み」ボタンから eBay のサイトで落札価格を確認できます。
+- 国内の価格は API で取得した範囲（楽天 30 件・Yahoo! 50 件）での最安値です。
+- 「未開封BOX」は JAN コードがない出品（オリパ・くじなど）を自然に除けますが、JAN が書かれていない正規品も対象外になります。
+- 楽天・Yahoo! の API の利用規約に従い、画面の下にクレジット（Supported by Rakuten Developers / Webサービス by Yahoo! JAPAN）を表示しています。
+- 検索条件・お宝の条件・最後の結果は、そのブラウザ（localStorage）に保存されます。
+
+### 必要な環境変数
+
+| 名前 | 内容 |
+|---|---|
+| `RAKUTEN_APP_ID` | 楽天ウェブサービスのアプリ ID |
+| `RAKUTEN_ACCESS_KEY` | （任意）楽天の新しい API 基盤用のアクセスキー。設定すると `openapi.rakuten.co.jp` を使います |
+| `RAKUTEN_AFFILIATE_ID` | （任意）楽天アフィリエイト ID |
+| `YAHOO_CLIENT_ID` | Yahoo!デベロッパーネットワークの Client ID |
+
+どちらかが未設定でも、設定されている方だけで動きます（画面に注意が出ます）。
 
 ## eBay の相場取得の使い方
 
@@ -112,6 +167,14 @@ URL を知っている第三者に eBay API の利用枠を使われないよう
 | `src/lib/ebayConditions.ts` | eBay の商品状態（コンディション ID）の一覧と既定値（新品） |
 | `src/lib/ebayConditions.test.ts` | コンディション指定のテスト |
 | `src/app/api/ebay/search/route.ts` | 画面から呼ぶ API（`/api/ebay/search`） |
+| `src/app/research/page.tsx` / `src/components/ResearchDashboard.tsx` | 自動リサーチの画面（`/research`） |
+| `src/app/api/research/route.ts` | 自動リサーチの API（`POST /api/research`） |
+| `src/lib/research.ts` | 自動リサーチ本体（国内検索 → 除外・識別 → eBay 照合） |
+| `src/lib/domestic.ts` | 楽天・Yahoo!ショッピングの API 呼び出し（サーバー専用） |
+| `src/lib/identify.ts` | JAN・カード番号・型番の抽出、除外ルール、eBay の検索条件 |
+| `src/lib/researchProfit.ts` | 利益の計算とお宝の判定（画面側） |
+| `src/lib/researchTypes.ts` / `src/lib/researchRequest.ts` | 自動リサーチの型・初期の検索条件・入力チェック |
+| `src/components/AppNav.tsx` / `src/components/Fields.tsx` | 画面上部のタブ・入力欄の共通部品 |
 | `src/lib/auth.ts` | 合言葉のチェックとログイン用 Cookie（サーバー専用） |
 | `src/lib/auth.test.ts` | 合言葉まわりのテスト |
 | `src/proxy.ts` | 全ページ・API の前でログイン済みかを確認する |
