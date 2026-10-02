@@ -8,7 +8,9 @@ function jsonResponse(body: unknown, status = 200) {
 const params = { kind: "sealed" as const, keyword: "テラスタルフェス BOX", minPriceJpy: 3000 };
 
 describe("searchRakuten", () => {
-  it("従来の API を呼び、送料込み/送料別を読み取る", async () => {
+  const env = { RAKUTEN_APP_ID: "app", RAKUTEN_ACCESS_KEY: "key" };
+
+  it("新しい API を呼び、アクセスキーと Referer / Origin をヘッダーで送る", async () => {
     const fetchFn = vi.fn<typeof fetch>(async () =>
       jsonResponse({
         Items: [
@@ -26,14 +28,20 @@ describe("searchRakuten", () => {
         ],
       }),
     );
-    const offers = await searchRakuten(params, { RAKUTEN_APP_ID: "app" }, fetchFn as unknown as typeof fetch);
+    const offers = await searchRakuten({ ...params, siteOrigin: "https://example.vercel.app" }, env, fetchFn);
 
-    const url = new URL(String(fetchFn.mock.calls[0][0]));
-    expect(url.origin + url.pathname).toBe("https://app.rakuten.co.jp/services/api/IchibaItem/Search/20220601");
+    const [input, init] = fetchFn.mock.calls[0];
+    const url = new URL(String(input));
+    expect(url.origin + url.pathname).toBe("https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20220601");
     expect(url.searchParams.get("applicationId")).toBe("app");
+    expect(url.searchParams.get("accessKey")).toBeNull();
     expect(url.searchParams.get("keyword")).toBe("テラスタルフェス BOX");
     expect(url.searchParams.get("minPrice")).toBe("3000");
-    expect(url.searchParams.get("accessKey")).toBeNull();
+    expect(init?.headers).toMatchObject({
+      accessKey: "key",
+      Referer: "https://example.vercel.app/",
+      Origin: "https://example.vercel.app",
+    });
 
     expect(offers[0]).toMatchObject({
       source: "rakuten",
@@ -46,26 +54,28 @@ describe("searchRakuten", () => {
     expect(offers[1].shipping).toBe("extra");
   });
 
-  it("RAKUTEN_ACCESS_KEY があれば新しい API を使う", async () => {
+  it("RAKUTEN_SITE_URL があれば Referer / Origin に使う", async () => {
     const fetchFn = vi.fn<typeof fetch>(async () => jsonResponse({ Items: [] }));
-    await searchRakuten(params, { RAKUTEN_APP_ID: "app", RAKUTEN_ACCESS_KEY: "key" }, fetchFn as unknown as typeof fetch);
-    const url = new URL(String(fetchFn.mock.calls[0][0]));
-    expect(url.host).toBe("openapi.rakuten.co.jp");
-    expect(url.searchParams.get("accessKey")).toBe("key");
+    await searchRakuten({ ...params, siteOrigin: "https://preview.vercel.app" }, { ...env, RAKUTEN_SITE_URL: "my-site.vercel.app" }, fetchFn);
+    expect(fetchFn.mock.calls[0][1]?.headers).toMatchObject({ Origin: "https://my-site.vercel.app" });
   });
 
-  it("0 件（404 not_found）は空配列、それ以外のエラーは日本語のエラー", async () => {
-    const notFound = vi.fn<typeof fetch>(async () => jsonResponse({ error: "not_found", error_description: "not found" }, 404));
-    expect(await searchRakuten(params, { RAKUTEN_APP_ID: "app" }, notFound as unknown as typeof fetch)).toEqual([]);
-
-    const bad = vi.fn<typeof fetch>(async () => jsonResponse({ error: "wrong_parameter", error_description: "specify valid applicationId" }, 400));
-    await expect(searchRakuten(params, { RAKUTEN_APP_ID: "app" }, bad as unknown as typeof fetch)).rejects.toThrow(
-      /楽天: 検索に失敗しました（specify valid applicationId）/,
-    );
-  });
-
-  it("キー未設定ならエラー", async () => {
+  it("アプリ ID・アクセスキーが未設定ならエラー", async () => {
     await expect(searchRakuten(params, {}, vi.fn())).rejects.toBeInstanceOf(DomesticApiError);
+    await expect(searchRakuten(params, { RAKUTEN_APP_ID: "app" }, vi.fn())).rejects.toThrow(/RAKUTEN_ACCESS_KEY が設定されていません/);
+  });
+
+  it("0 件（404 not_found）は空配列", async () => {
+    const notFound = vi.fn<typeof fetch>(async () => jsonResponse({ error: "not_found", error_description: "not found" }, 404));
+    expect(await searchRakuten(params, env, notFound)).toEqual([]);
+  });
+
+  it("エラーの種類ごとに直し方を案内する", async () => {
+    const fail = (status: number, errorMessage: string) =>
+      searchRakuten({ ...params, siteOrigin: "https://example.vercel.app" }, env, vi.fn<typeof fetch>(async () => jsonResponse({ errors: { errorCode: status, errorMessage } }, status)));
+    await expect(fail(403, "Invalid Access Key")).rejects.toThrow(/同じアプリのアクセスキー/);
+    await expect(fail(400, "specify valid applicationId")).rejects.toThrow(/新しい楽天ウェブサービスで登録したアプリ/);
+    await expect(fail(403, "REQUEST_CONTEXT_BODY_HTTP_REFERRER_MISSING")).rejects.toThrow(/許可されたWebサイト」に https:\/\/example\.vercel\.app/);
   });
 });
 

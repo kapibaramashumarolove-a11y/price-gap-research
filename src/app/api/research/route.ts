@@ -19,7 +19,8 @@ export async function POST(request: NextRequest) {
   if (typeof parsed === "string") return Response.json({ error: parsed }, { status: 400 });
 
   try {
-    return Response.json(await runResearch(parsed));
+    // 楽天 API は Referer / Origin を「許可されたWebサイト」と照合するので、このサイトの URL を渡す
+    return Response.json(await runResearch(parsed, undefined, request.nextUrl.origin));
   } catch (err) {
     console.error("research failed:", err);
     return Response.json({ error: "リサーチ中にエラーが発生しました。サーバーのログを確認してください。" }, { status: 500 });

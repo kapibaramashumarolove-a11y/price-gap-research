@@ -192,6 +192,8 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
 export async function runResearch(
   request: ResearchRequest,
   deps: ResearchDeps = defaultDeps,
+  /** このサイト自身の URL。楽天 API に送る Referer / Origin に使う */
+  siteOrigin?: string,
 ): Promise<ResearchResponse> {
   const warnings: string[] = [];
   const domesticParams = {
@@ -199,6 +201,7 @@ export async function runResearch(
     keyword: request.keyword,
     minPriceJpy: request.minPriceJpy,
     maxPriceJpy: request.maxPriceJpy,
+    siteOrigin,
   };
 
   const [rakuten, yahoo] = await Promise.all(

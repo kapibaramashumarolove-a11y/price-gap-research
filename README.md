@@ -61,7 +61,8 @@ URL を知っている第三者に eBay API の利用枠を使われないよう
    | `EBAY_CLIENT_SECRET` | 本番用の Cert ID（`PRD-` で始まる） |
    | `EBAY_ENVIRONMENT` | `production` |
    | `APP_PASSWORD` | 自分で決めた合言葉 |
-   | `RAKUTEN_APP_ID` | 楽天のアプリ ID（自動リサーチ用） |
+   | `RAKUTEN_APP_ID` | 楽天のアプリケーション ID（自動リサーチ用） |
+   | `RAKUTEN_ACCESS_KEY` | 楽天のアクセスキー（自動リサーチ用） |
    | `YAHOO_CLIENT_ID` | Yahoo! の Client ID（自動リサーチ用） |
 
 3. 「Deploy」を押すと `https://〇〇.vercel.app` の URL ができます。スマホで開き、合言葉を入力します。
@@ -111,12 +112,23 @@ URL を知っている第三者に eBay API の利用枠を使われないよう
 
 | 名前 | 内容 |
 |---|---|
-| `RAKUTEN_APP_ID` | 楽天ウェブサービスのアプリ ID |
-| `RAKUTEN_ACCESS_KEY` | （任意）楽天の新しい API 基盤用のアクセスキー。設定すると `openapi.rakuten.co.jp` を使います |
+| `RAKUTEN_APP_ID` | 楽天ウェブサービスのアプリケーション ID |
+| `RAKUTEN_ACCESS_KEY` | 楽天ウェブサービスのアクセスキー（`RAKUTEN_APP_ID` と同じアプリのもの） |
+| `RAKUTEN_SITE_URL` | （任意）楽天の「許可されたWebサイト」に登録した URL。未設定ならこのサイト自身の URL を使います |
 | `RAKUTEN_AFFILIATE_ID` | （任意）楽天アフィリエイト ID |
 | `YAHOO_CLIENT_ID` | Yahoo!デベロッパーネットワークの Client ID |
 
 どちらかが未設定でも、設定されている方だけで動きます（画面に注意が出ます）。
+
+### 楽天 API の設定（2026 年の移行後）
+
+楽天の旧 API（`app.rakuten.co.jp`）は 2026 年 5 月に停止しました。このアプリは新しい API（`openapi.rakuten.co.jp`）を使い、次の 3 つがそろって初めて動きます。
+
+1. [楽天ウェブサービス](https://webservice.rakuten.co.jp/) で新しくアプリを登録し、**アプリケーション ID** と **アクセスキー** を取得する（移行前に作ったアプリの ID は使えません）。
+2. アプリ設定の **「許可されたWebサイト」** に、このアプリを公開している URL（例: `https://〇〇.vercel.app`）を登録する。アプリは楽天に `Referer` / `Origin` ヘッダーとしてこの URL を送ります。
+3. Vercel の環境変数に `RAKUTEN_APP_ID` と `RAKUTEN_ACCESS_KEY` を登録して Redeploy する。
+
+エラーが出たときは、画面の注意に原因（アクセスキー違い・アプリ ID 違い・許可されたWebサイト未登録など）と直し方が表示されます。
 
 ## eBay の相場取得の使い方
 

@@ -18,6 +18,8 @@ export type DomesticSearchParams = {
   keyword: string;
   minPriceJpy?: number;
   maxPriceJpy?: number;
+  /** このサイト自身の URL（例: https://example.vercel.app）。楽天に送る Referer / Origin に使う */
+  siteOrigin?: string;
 };
 
 /** 画面にそのまま表示してよい（キーの値を含まない）エラー */
@@ -28,13 +30,14 @@ export class DomesticApiError extends Error {
   }
 }
 
-// ---- 楽天市場（商品検索 API 2022-06-01）----
+// ---- 楽天市場（商品検索 API）----
 // https://webservice.rakuten.co.jp/documentation/ichiba-item-search
-// 楽天は新しい API 基盤（openapi.rakuten.co.jp、accessKey が必要）へ移行中のため、
-// RAKUTEN_ACCESS_KEY が設定されていれば新しい方、なければ従来の方を使う。
+// 旧 API（app.rakuten.co.jp）は 2026 年 5 月に停止したため、新しい API 基盤（openapi.rakuten.co.jp）を使う。
+// 新しい API では次の 3 つがすべて必要:
+//   - アプリ ID（applicationId）とアクセスキー（accessKey ヘッダー）。同じアプリで発行された組み合わせであること
+//   - Referer / Origin ヘッダーが、楽天のアプリ設定の「許可されたWebサイト」に登録したドメインと一致すること
 
-const RAKUTEN_LEGACY_URL = "https://app.rakuten.co.jp/services/api/IchibaItem/Search/20220601";
-const RAKUTEN_OPENAPI_URL = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20220601";
+const RAKUTEN_URL = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20220601";
 /** 1 回で取れる最大件数 */
 const RAKUTEN_HITS = 30;
 
@@ -54,6 +57,35 @@ export function isRakutenConfigured(env: Record<string, string | undefined> = pr
   return cleanEnvValue(env.RAKUTEN_APP_ID) !== "";
 }
 
+/**
+ * 楽天に送る Referer / Origin。RAKUTEN_SITE_URL があればそれを、なければこのサイト自身の URL を使う。
+ * （楽天のアプリ設定の「許可されたWebサイト」と一致している必要がある）
+ */
+export function rakutenSiteOrigin(siteOrigin: string | undefined, env: Record<string, string | undefined>): string | undefined {
+  const raw = cleanEnvValue(env.RAKUTEN_SITE_URL) || siteOrigin;
+  if (!raw) return undefined;
+  try {
+    return new URL(raw.includes("://") ? raw : `https://${raw}`).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 楽天のエラーを、直し方が分かる日本語にする */
+function rakutenErrorMessage(status: number, detail: string, origin: string | undefined): string {
+  if (status === 429) return "楽天: アクセスが多すぎます。少し待ってからもう一度試してください。";
+  if (/access ?key/i.test(detail)) {
+    return `楽天: アクセスキーが正しくありません（${detail}）。RAKUTEN_ACCESS_KEY が、RAKUTEN_APP_ID と同じアプリのアクセスキーか確認してください。`;
+  }
+  if (/applicationId/i.test(detail)) {
+    return `楽天: アプリ ID が正しくありません（${detail}）。2026 年の新しい楽天ウェブサービスで登録したアプリのアプリケーション ID を RAKUTEN_APP_ID に設定してください。`;
+  }
+  if (/refer|origin|domain|site/i.test(detail) || status === 403) {
+    return `楽天: アクセスが拒否されました（${detail}）。楽天のアプリ設定の「許可されたWebサイト」に ${origin ?? "このサイトの URL"} を登録しているか確認してください。`;
+  }
+  return `楽天: 検索に失敗しました（${detail}）。`;
+}
+
 export async function searchRakuten(
   params: DomesticSearchParams,
   env: Record<string, string | undefined> = process.env,
@@ -62,11 +94,16 @@ export async function searchRakuten(
   const appId = cleanEnvValue(env.RAKUTEN_APP_ID);
   if (!appId) throw new DomesticApiError("楽天: 環境変数 RAKUTEN_APP_ID が設定されていません。");
   const accessKey = cleanEnvValue(env.RAKUTEN_ACCESS_KEY);
+  if (!accessKey) {
+    throw new DomesticApiError(
+      "楽天: 環境変数 RAKUTEN_ACCESS_KEY が設定されていません（2026 年の楽天 API の移行で、アプリ ID とアクセスキーの両方が必要になりました）。",
+    );
+  }
   const affiliateId = cleanEnvValue(env.RAKUTEN_AFFILIATE_ID);
+  const origin = rakutenSiteOrigin(params.siteOrigin, env);
 
-  const url = new URL(accessKey ? RAKUTEN_OPENAPI_URL : RAKUTEN_LEGACY_URL);
+  const url = new URL(RAKUTEN_URL);
   url.searchParams.set("applicationId", appId);
-  if (accessKey) url.searchParams.set("accessKey", accessKey);
   if (affiliateId) url.searchParams.set("affiliateId", affiliateId);
   url.searchParams.set("format", "json");
   url.searchParams.set("formatVersion", "2");
@@ -77,7 +114,14 @@ export async function searchRakuten(
   if (params.minPriceJpy) url.searchParams.set("minPrice", String(params.minPriceJpy));
   if (params.maxPriceJpy) url.searchParams.set("maxPrice", String(params.maxPriceJpy));
 
-  const res = await fetchFn(url, { cache: "no-store" });
+  // アクセスキーは URL に載せず（ログに残りにくいように）ヘッダーで送る
+  const headers: Record<string, string> = { accessKey, Accept: "application/json" };
+  if (origin) {
+    headers.Referer = `${origin}/`;
+    headers.Origin = origin;
+  }
+
+  const res = await fetchFn(url, { headers, cache: "no-store" });
   const data = (await res.json().catch(() => ({}))) as {
     Items?: RakutenItem[];
     error?: string;
@@ -87,12 +131,8 @@ export async function searchRakuten(
   // 0 件のときは 404（not_found）が返る
   if (res.status === 404 && data.error === "not_found") return [];
   if (!res.ok) {
-    const detail = data.error_description ?? data.errors?.errorMessage ?? `HTTP ${res.status}`;
-    throw new DomesticApiError(
-      res.status === 429
-        ? "楽天: アクセスが多すぎます。少し待ってからもう一度試してください。"
-        : `楽天: 検索に失敗しました（${detail}）。`,
-    );
+    const detail = data.errors?.errorMessage ?? data.error_description ?? `HTTP ${res.status}`;
+    throw new DomesticApiError(rakutenErrorMessage(res.status, detail, origin));
   }
 
   return (data.Items ?? []).flatMap((item): RawDomesticOffer[] => {
