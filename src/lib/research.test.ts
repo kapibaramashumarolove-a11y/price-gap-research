@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RawDomesticOffer } from "./domestic";
 import { DomesticApiError } from "./domestic";
 import type { EbayItemSummary } from "./ebay";
-import { clearEbayCache, groupOffers, percentile, runResearch, type ResearchDeps } from "./research";
+import { clearEbayCache, groupOffers, percentile, runResearch, trimPriceOutliers, type ResearchDeps } from "./research";
 
 function offer(partial: Partial<RawDomesticOffer> & Pick<RawDomesticOffer, "title" | "priceJpy">): RawDomesticOffer {
   return {
@@ -135,5 +135,92 @@ describe("runResearch", () => {
     );
     expect(searchEbay).toHaveBeenCalledTimes(2);
     expect(res.candidates[0].ebay).toMatchObject({ usedKeywordFallback: true, count: 3, medianUsd: 90 });
+  });
+});
+
+describe("商品指定（kind: item）", () => {
+  it("キーワードの単語をすべて含む国内商品だけを 1 つにまとめ、eBay を英語キーワードで 1 回調べる", async () => {
+    const searchEbay = vi.fn(async () => ({
+      total: 40,
+      items: [
+        ebayItem("Nikon F3 35mm SLR Film Camera Body Only", 300),
+        ebayItem("Nikon F3 HP Body [Near Mint]", 400),
+        ebayItem("Nikon F3 Body for parts not working", 80),
+        ebayItem("Nikon FM2 body", 200),
+        ebayItem("Nikon F3 body + 50mm lens lot", 600),
+      ],
+    }));
+    const res = await runResearch(
+      { kind: "item", keyword: "ニコン F3 ボディ", ngWords: [], ebayKeyword: "Nikon F3 body", condition: "used" },
+      {
+        searchRakuten: vi.fn(async () => [
+          offer({ source: "rakuten", title: "ニコン Nikon F3 ボディ 中古 美品", priceJpy: 38000 }),
+          offer({ source: "rakuten", title: "ニコン F3 ボディ ジャンク", priceJpy: 9000 }),
+        ]),
+        searchYahoo: vi.fn(async () => [
+          offer({ title: "Nikon ニコン F3 ボディ", priceJpy: 35000 }),
+          offer({ title: "ニコン F3 用 ストラップ", priceJpy: 2000 }),
+        ]),
+        searchEbay,
+        now: () => 0,
+      },
+    );
+    expect(res.stats).toMatchObject({ rakuten: 2, yahoo: 2, excluded: 1, unidentified: 1 });
+    expect(res.candidates).toHaveLength(1);
+    const c = res.candidates[0];
+    expect(c).toMatchObject({ kind: "item", label: "中古" });
+    expect(c.offers.map((o) => o.priceJpy)).toEqual([35000, 38000]);
+    expect(searchEbay).toHaveBeenCalledWith({ q: "Nikon F3 body", gtin: undefined, conditionIds: ["1500", "2750", "3000", "4000", "5000", "6000"] });
+    // 部品取り・FM2・まとめ売りは除く
+    expect(c.ebay).toMatchObject({ count: 2, minUsd: 300, medianUsd: 350 });
+  });
+
+  it("新品を探すときは中古品を除き、国内で見つからなければ eBay を呼ばない", async () => {
+    const searchEbay = vi.fn();
+    const res = await runResearch(
+      { kind: "item", keyword: "BOSS DS-1", ngWords: [], ebayKeyword: "Boss DS-1" },
+      {
+        searchRakuten: vi.fn(async () => [offer({ source: "rakuten", title: "BOSS DS-1 中古", priceJpy: 5000 })]),
+        searchYahoo: vi.fn(async () => []),
+        searchEbay,
+        now: () => 0,
+      },
+    );
+    expect(res.candidates).toEqual([]);
+    expect(res.stats.excluded).toBe(1);
+    expect(searchEbay).not.toHaveBeenCalled();
+  });
+
+  it("JAN 指定: JAN が一致する商品を集め、eBay は JAN で探して少なければ英語キーワードで探し直す", async () => {
+    const jan = "4521329362342";
+    const searchEbay = vi.fn(async ({ gtin }: { gtin?: string }) => ({
+      total: gtin ? 1 : 3,
+      items: gtin
+        ? [ebayItem("Terastal Festival Box", 80)]
+        : [ebayItem("Terastal Festival Box", 80), ebayItem("Terastal Festival Box JP", 90), ebayItem("Terastal Festival Box sealed", 100)],
+    }));
+    const res = await runResearch(
+      { kind: "item", keyword: "", ngWords: [], jan, ebayKeyword: "Terastal Festival Box", condition: "new" },
+      {
+        searchRakuten: vi.fn(async () => [
+          offer({ source: "rakuten", title: "テラスタルフェス BOX", priceJpy: 19000, searchText: `テラスタルフェス BOX JAN:${jan}` }),
+          offer({ source: "rakuten", title: "別の商品", priceJpy: 100, searchText: "JAN:4521329362343" }),
+        ]),
+        searchYahoo: vi.fn(async () => [offer({ title: "テラスタルフェス BOX", priceJpy: 19500, jan })]),
+        searchEbay,
+        now: () => 0,
+      },
+    );
+    expect(res.candidates[0].offers.map((o) => o.priceJpy)).toEqual([19000, 19500]);
+    expect(res.candidates[0].label).toBe(`新品・JAN ${jan}`);
+    expect(searchEbay).toHaveBeenCalledTimes(2);
+    expect(res.candidates[0].ebay).toMatchObject({ usedKeywordFallback: true, count: 3 });
+  });
+});
+
+describe("trimPriceOutliers", () => {
+  it("中央値の 30% 未満・3 倍超の出品（部品・まとめ売り）を除く", () => {
+    const items = [10, 500, 560, 600, 650, 2000].map((p) => ebayItem(`item ${p}`, p));
+    expect(trimPriceOutliers(items).map((i) => Number(i.price?.value))).toEqual([500, 560, 600, 650]);
   });
 });

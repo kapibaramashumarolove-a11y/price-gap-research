@@ -16,3 +16,25 @@ describe("parseResearchRequest", () => {
     expect(parseResearchRequest({ kind: "sealed", keyword: "ポケカ", maxLookups: 99 })).toMatch(/30 件/);
   });
 });
+
+describe("商品指定（kind: item）の検査", () => {
+  it("JAN があればキーワードなしでもよく、状態の初期値は新品", () => {
+    expect(parseResearchRequest({ kind: "item", keyword: "", jan: "4521329362342" })).toMatchObject({
+      kind: "item",
+      jan: "4521329362342",
+      condition: "new",
+    });
+  });
+
+  it("JAN がなければ eBay 用の英語キーワードが必要", () => {
+    expect(parseResearchRequest({ kind: "item", keyword: "BOSS DS-1" })).toMatch(/英語キーワードか JAN/);
+    expect(parseResearchRequest({ kind: "item", keyword: "BOSS DS-1", ebayKeyword: "Boss DS-1", condition: "used" })).toMatchObject({
+      condition: "used",
+    });
+  });
+
+  it("JAN のチェックデジット違い・状態の誤りはエラー", () => {
+    expect(parseResearchRequest({ kind: "item", keyword: "x", jan: "4521329362343" })).toMatch(/JAN/);
+    expect(parseResearchRequest({ kind: "item", keyword: "BOSS", ebayKeyword: "Boss", condition: "junk" })).toMatch(/状態/);
+  });
+});

@@ -7,10 +7,17 @@
  * - psa10:  PSA10 鑑定済みカード。カード番号（例: 205/172）で識別し、eBay は「番号 PSA 10」で検索する
  * - single: 未鑑定のシングルカード。カード番号で識別する
  * - other:  その他の商品（スニーカーなど）。JAN コードか型番で識別する
+ * - item:   商品指定。1 つの検索条件 = 1 つの商品（カメラ・釣具・レトロゲームなど、中古や JAN のない商品向け）。
+ *           国内は検索キーワード（または JAN）、eBay は英語キーワード（または JAN）で探し、自動の識別はしない
  */
-export type ResearchKind = "sealed" | "psa10" | "single" | "other";
+export type ResearchKind = "item" | "sealed" | "psa10" | "single" | "other";
 
 export const RESEARCH_KINDS: { id: ResearchKind; label: string; hint: string }[] = [
+  {
+    id: "item",
+    label: "商品指定",
+    hint: "1 つの条件で 1 つの商品を調べます。国内はキーワード（または JAN）、eBay は英語キーワード（または JAN）で探します",
+  },
   { id: "sealed", label: "未開封BOX", hint: "JAN コードで同じ商品を見分けます" },
   { id: "psa10", label: "PSA10", hint: "カード番号（例: 205/172）＋ PSA10 で見分けます" },
   { id: "single", label: "シングル（未鑑定）", hint: "カード番号（例: 205/172）で見分けます" },
@@ -34,7 +41,19 @@ export type ResearchRequest = {
   ebayKeyword?: string;
   /** eBay で相場を調べる商品数の上限（API の利用回数を抑えるため） */
   maxLookups?: number;
+  /** 商品指定のみ: JAN コード。あれば国内・eBay とも JAN で探す */
+  jan?: string;
+  /** 商品指定のみ: 商品の状態（初期値は新品） */
+  condition?: ItemCondition;
 };
+
+export type ItemCondition = "new" | "used" | "any";
+
+export const ITEM_CONDITIONS: { id: ItemCondition; label: string }[] = [
+  { id: "new", label: "新品" },
+  { id: "used", label: "中古" },
+  { id: "any", label: "すべて" },
+];
 
 export const MAX_LOOKUPS_LIMIT = 30;
 export const DEFAULT_MAX_LOOKUPS = 15;
@@ -112,6 +131,8 @@ export type ResearchResponse = {
 export type ResearchPreset = ResearchRequest & {
   id: string;
   name: string;
+  /** ジャンル（カメラ・釣具など）。一覧の絞り込みと、ジャンルごとの実行に使う */
+  genre?: string;
   /** この検索で使う国際送料 [円]（空なら計算条件の値） */
   internationalShippingJpy?: number;
 };

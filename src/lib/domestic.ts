@@ -3,7 +3,7 @@
 
 import { cleanEnvValue } from "./ebay";
 import { normalizeText } from "./identify";
-import type { DomesticOffer, ResearchKind, ShippingStatus } from "./researchTypes";
+import type { DomesticOffer, ItemCondition, ResearchKind, ShippingStatus } from "./researchTypes";
 
 /** 識別子（JAN）を探すための説明文などを付けた商品データ。画面には返さない */
 export type RawDomesticOffer = DomesticOffer & {
@@ -20,6 +20,10 @@ export type DomesticSearchParams = {
   maxPriceJpy?: number;
   /** このサイト自身の URL（例: https://example.vercel.app）。楽天に送る Referer / Origin に使う */
   siteOrigin?: string;
+  /** 商品指定のみ: JAN コード（Yahoo! は JAN で完全一致検索、楽天はキーワードがなければ JAN で検索） */
+  jan?: string;
+  /** 商品指定のみ: 商品の状態 */
+  condition?: ItemCondition;
 };
 
 /** 画面にそのまま表示してよい（キーの値を含まない）エラー */
@@ -110,7 +114,7 @@ export async function searchRakuten(
   if (affiliateId) url.searchParams.set("affiliateId", affiliateId);
   url.searchParams.set("format", "json");
   url.searchParams.set("formatVersion", "2");
-  url.searchParams.set("keyword", params.keyword);
+  url.searchParams.set("keyword", params.keyword || params.jan || "");
   url.searchParams.set("hits", String(RAKUTEN_HITS));
   url.searchParams.set("availability", "1");
   url.searchParams.set("imageFlag", "1");
@@ -194,11 +198,13 @@ export async function searchYahoo(
 
   const url = new URL(YAHOO_URL);
   url.searchParams.set("appid", clientId);
-  url.searchParams.set("query", params.keyword);
+  if (params.jan) url.searchParams.set("jan_code", params.jan);
+  else url.searchParams.set("query", params.keyword);
   url.searchParams.set("results", String(YAHOO_RESULTS));
   url.searchParams.set("in_stock", "true");
-  // 未開封 BOX・その他は新品だけ。カードは中古扱いで出品されることが多いので絞らない
-  if (params.kind === "sealed" || params.kind === "other") url.searchParams.set("condition", "new");
+  // 未開封 BOX・その他は新品だけ、商品指定は指定の状態。カードは中古扱いで出品されることが多いので絞らない
+  const condition = params.kind === "item" ? (params.condition ?? "new") : params.kind === "sealed" || params.kind === "other" ? "new" : "any";
+  if (condition !== "any") url.searchParams.set("condition", condition);
   if (params.minPriceJpy) url.searchParams.set("price_from", String(params.minPriceJpy));
   if (params.maxPriceJpy) url.searchParams.set("price_to", String(params.maxPriceJpy));
 

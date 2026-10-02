@@ -4,10 +4,31 @@
 // 利益の計算は画面側で行う（為替・手数料・お宝の条件を変えても再取得せずに済むように）。
 
 import { DomesticApiError, searchRakuten, searchYahoo, type RawDomesticOffer } from "./domestic";
-import { EbayApiError, extractUsdPrices, searchEbayListings, summarizePrices, type ListingSearchParams, type ListingSearchResult } from "./ebay";
-import { ebayWebSearchUrl, identify, isExcludedOffer, planEbaySearch, type Identity } from "./identify";
+import {
+  EbayApiError,
+  extractUsdPrices,
+  searchEbayListings,
+  summarizePrices,
+  type EbayItemSummary,
+  type ListingSearchParams,
+  type ListingSearchResult,
+} from "./ebay";
+import {
+  containsAllTokens,
+  ebayWebSearchUrl,
+  extractJan,
+  identify,
+  isExcludedOffer,
+  keywordTokens,
+  normalizeText,
+  planEbaySearch,
+  planItemEbaySearch,
+  type EbaySearchPlan,
+  type Identity,
+} from "./identify";
 import {
   DEFAULT_MAX_LOOKUPS,
+  ITEM_CONDITIONS,
   MAX_LOOKUPS_LIMIT,
   type Candidate,
   type DomesticOffer,
@@ -66,6 +87,19 @@ export function percentile(prices: number[], ratio: number): number | null {
   return Math.round(value * 100) / 100;
 }
 
+/**
+ * 中央値から大きく外れた出品を除く（中央値の 30% 未満・3 倍超）。
+ * タイトルの条件をすり抜けた部品・付属品（ドラグワッシャー・AC アダプターなど）や、まとめ売りを落とすため。
+ */
+export function trimPriceOutliers(items: EbayItemSummary[]): EbayItemSummary[] {
+  const median = summarizePrices(extractUsdPrices(items)).median;
+  if (median === null) return items;
+  return items.filter((item) => {
+    const price = Number(item.price?.value);
+    return Number.isFinite(price) && price >= median * 0.3 && price <= median * 3;
+  });
+}
+
 type Group = { identity: Identity; offers: RawDomesticOffer[] };
 
 /** 除外・識別して、同じ商品ごとにまとめる */
@@ -117,17 +151,17 @@ function toPublicOffers(offers: RawDomesticOffer[]): DomesticOffer[] {
     }));
 }
 
+/**
+ * eBay で相場を調べる。primary で比較できる出品が 3 件未満なら fallback（英語キーワード）で探し直す。
+ * @returns 相場、または調べられなかった理由
+ */
 async function lookUpEbay(
-  kind: ResearchRequest["kind"],
-  identity: Identity,
-  ebayKeyword: string | undefined,
+  primary: EbaySearchPlan,
+  fallback: EbaySearchPlan | undefined,
   deps: ResearchDeps,
 ): Promise<EbayMarket | string> {
-  const plan = planEbaySearch(kind, identity);
-  if (!plan) return "eBay で検索するための識別子がありません。";
-
-  const summarize = (result: ListingSearchResult, query: string, usedKeywordFallback: boolean): EbayMarket => {
-    const matched = result.items.filter((item) => item.title && plan.titleFilter(item.title));
+  const summarize = (plan: EbaySearchPlan, result: ListingSearchResult, usedKeywordFallback: boolean): EbayMarket => {
+    const matched = trimPriceOutliers(result.items.filter((item) => item.title && plan.titleFilter(item.title)));
     const prices = extractUsdPrices(matched);
     const { count, min, median } = summarizePrices(prices);
     const samples = matched
@@ -141,10 +175,9 @@ async function lookUpEbay(
       .filter((sample, i, all) => all.findIndex((x) => x.url === sample.url) === i)
       .sort((a, b) => a.priceUsd - b.priceUsd)
       .slice(0, SAMPLE_COUNT);
-    const webQuery = usedKeywordFallback ? query : plan.webQuery;
     return {
-      query,
-      gtin: usedKeywordFallback ? undefined : plan.gtin,
+      query: plan.q ?? "",
+      gtin: plan.gtin,
       usedKeywordFallback,
       conditionIds: plan.conditionIds,
       total: result.total,
@@ -153,26 +186,68 @@ async function lookUpEbay(
       p25Usd: percentile(prices, 0.25),
       medianUsd: median,
       samples,
-      activeUrl: ebayWebSearchUrl(webQuery, false),
-      soldUrl: ebayWebSearchUrl(webQuery, true),
+      activeUrl: ebayWebSearchUrl(plan.webQuery, false),
+      soldUrl: ebayWebSearchUrl(plan.webQuery, true),
     };
   };
+  const search = (plan: EbaySearchPlan) =>
+    cachedEbaySearch({ q: plan.q, gtin: plan.gtin, conditionIds: plan.conditionIds }, deps);
 
   try {
-    const first = await cachedEbaySearch({ q: plan.q, gtin: plan.gtin, conditionIds: plan.conditionIds }, deps);
-    const market = summarize(first, plan.q ?? "", false);
+    const market = summarize(primary, await search(primary), false);
     // JAN で見つからない（eBay のカタログに未登録など）ときは、英語のキーワードで探し直す
-    const keyword = ebayKeyword?.trim();
-    if (plan.gtin && market.count < 3 && keyword) {
-      const retry = await cachedEbaySearch({ q: keyword, conditionIds: plan.conditionIds }, deps);
-      return summarize(retry, keyword, true);
-    }
+    if (fallback && market.count < 3) return summarize(fallback, await search(fallback), true);
     return market;
   } catch (err) {
     if (err instanceof EbayApiError) return err.message;
     console.error("eBay lookup failed:", err);
     return "eBay への接続中にエラーが発生しました。";
   }
+}
+
+/** 識別で見つけた商品の eBay 検索（JAN 検索で見つからなければ ebayKeyword で探し直す） */
+function plansForIdentity(
+  kind: ResearchRequest["kind"],
+  identity: Identity,
+  ebayKeyword: string | undefined,
+): { primary: EbaySearchPlan; fallback?: EbaySearchPlan } | undefined {
+  const primary = planEbaySearch(kind, identity);
+  if (!primary) return undefined;
+  const keyword = ebayKeyword?.trim();
+  const fallback = primary.gtin && keyword ? { ...primary, q: keyword, gtin: undefined, webQuery: keyword } : undefined;
+  return { primary, fallback };
+}
+
+/**
+ * 商品指定の国内商品を絞る。JAN があれば JAN が一致するもの（楽天は説明文などから抽出）、
+ * なければタイトルに検索キーワードの単語がすべて含まれるものだけを残す。
+ */
+export function matchItemOffers(
+  request: Pick<ResearchRequest, "keyword" | "ngWords" | "jan" | "condition">,
+  offers: RawDomesticOffer[],
+): { matched: RawDomesticOffer[]; excluded: number; unmatched: number } {
+  const tokens = keywordTokens(request.keyword);
+  const matched: RawDomesticOffer[] = [];
+  let excluded = 0;
+  let unmatched = 0;
+  for (const offer of offers) {
+    // 新品を探すときは中古品を除く（楽天には状態で絞る検索条件がないため）
+    const usedOnNew = (request.condition ?? "new") === "new" && /中古|USED/i.test(normalizeText(offer.title));
+    if (isExcludedOffer("item", offer.title, request.ngWords) || usedOnNew) {
+      excluded++;
+      continue;
+    }
+    const janMatches = request.jan
+      ? (offer.jan ?? extractJan(offer.searchText)) === request.jan
+      : false;
+    const keywordMatches = tokens.length > 0 && containsAllTokens(offer.title, tokens);
+    // Yahoo! の JAN 検索の結果は JAN が一致している。楽天は JAN が見つからなければキーワードで判定する
+    const ok = request.jan ? janMatches || (offer.source === "yahoo" && !offer.jan) || keywordMatches : keywordMatches;
+    if (ok) matched.push(offer);
+    else unmatched++;
+  }
+  matched.sort((a, b) => a.priceJpy - b.priceJpy);
+  return { matched, excluded, unmatched };
 }
 
 /** 同時に動かす数を制限して、配列の各要素に非同期処理を行う */
@@ -202,6 +277,8 @@ export async function runResearch(
     minPriceJpy: request.minPriceJpy,
     maxPriceJpy: request.maxPriceJpy,
     siteOrigin,
+    jan: request.kind === "item" ? request.jan : undefined,
+    condition: request.condition,
   };
 
   const [rakuten, yahoo] = await Promise.all(
@@ -219,12 +296,42 @@ export async function runResearch(
     }),
   );
 
-  const { groups, excluded, unidentified } = groupOffers(request, [...(rakuten ?? []), ...(yahoo ?? [])]);
+  const allOffers = [...(rakuten ?? []), ...(yahoo ?? [])];
+  const stats = { rakuten: rakuten?.length ?? null, yahoo: yahoo?.length ?? null };
+  const response = (candidates: Candidate[], excluded: number, unidentified: number, skippedLookups = 0): ResearchResponse => ({
+    candidates,
+    skippedLookups,
+    stats: { ...stats, excluded, unidentified },
+    warnings,
+    fetchedAt: new Date(deps.now()).toISOString(),
+  });
+
+  // 商品指定: 検索条件そのものが 1 つの商品。国内で見つかったときだけ eBay を 1 回調べる
+  if (request.kind === "item") {
+    const { matched, excluded, unmatched } = matchItemOffers(request, allOffers);
+    if (matched.length === 0) return response([], excluded, unmatched);
+    const plans = planItemEbaySearch({ jan: request.jan, ebayKeyword: request.ebayKeyword, condition: request.condition ?? "new" });
+    const market = plans ? await lookUpEbay(plans.primary, plans.fallback, deps) : "eBay 用の英語キーワードか JAN を設定してください。";
+    const conditionLabel = ITEM_CONDITIONS.find((c) => c.id === (request.condition ?? "new"))?.label ?? "";
+    const candidate: Candidate = {
+      key: `item:${request.jan || keywordTokens(request.keyword).join(" ")}|${request.condition ?? "new"}`,
+      label: [conditionLabel, request.jan && `JAN ${request.jan}`].filter(Boolean).join("・"),
+      kind: "item",
+      offers: toPublicOffers(matched),
+      ...(typeof market === "string" ? { ebay: null, ebayError: market } : { ebay: market }),
+    };
+    return response([candidate], excluded, unmatched);
+  }
+
+  const { groups, excluded, unidentified } = groupOffers(request, allOffers);
   const maxLookups = Math.min(Math.max(request.maxLookups ?? DEFAULT_MAX_LOOKUPS, 1), MAX_LOOKUPS_LIMIT);
   const targets = groups.slice(0, maxLookups);
 
   const candidates = await mapWithConcurrency(targets, EBAY_CONCURRENCY, async (group): Promise<Candidate> => {
-    const market = await lookUpEbay(request.kind, group.identity, request.ebayKeyword, deps);
+    const plans = plansForIdentity(request.kind, group.identity, request.ebayKeyword);
+    const market = plans
+      ? await lookUpEbay(plans.primary, plans.fallback, deps)
+      : "eBay で検索するための識別子がありません。";
     return {
       key: group.identity.key,
       label: group.identity.label,
@@ -234,11 +341,5 @@ export async function runResearch(
     };
   });
 
-  return {
-    candidates,
-    skippedLookups: groups.length - targets.length,
-    stats: { rakuten: rakuten?.length ?? null, yahoo: yahoo?.length ?? null, excluded, unidentified },
-    warnings,
-    fetchedAt: new Date(deps.now()).toISOString(),
-  };
+  return response(candidates, excluded, unidentified, groups.length - targets.length);
 }

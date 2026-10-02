@@ -4,8 +4,17 @@
 // 利益の条件を満たす「お宝商品」を一覧にする。
 // 検索条件・お宝の条件・最後の結果はブラウザの localStorage に保存する。
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { loadJson, saveJson, SETTINGS_KEY } from "@/lib/browserStorage";
+import {
+  applyImportedPresets,
+  CSV_TEMPLATE,
+  decodeCsvBytes,
+  presetsFromCsv,
+  presetsToCsv,
+  type CsvImportResult,
+  type CsvMode,
+} from "@/lib/presetCsv";
 import { DEFAULT_SETTINGS, type Settings } from "@/lib/profit";
 import {
   DEFAULT_CRITERIA,
@@ -18,14 +27,17 @@ import {
 import {
   DEFAULT_MAX_LOOKUPS,
   DEFAULT_PRESETS,
+  ITEM_CONDITIONS,
   MAX_LOOKUPS_LIMIT,
   RESEARCH_KINDS,
   type Candidate,
   type DomesticOffer,
+  type ItemCondition,
   type ResearchKind,
   type ResearchPreset,
   type ResearchResponse,
 } from "@/lib/researchTypes";
+import { parseResearchRequest } from "@/lib/researchRequest";
 import AppNav from "./AppNav";
 import { INPUT_CLASS, NumberField, TextField } from "./Fields";
 
@@ -33,6 +45,20 @@ const PRESETS_KEY = "price-gap:research-presets";
 const CRITERIA_KEY = "price-gap:research-criteria";
 const RESULTS_KEY = "price-gap:research-results";
 const ONLY_TREASURES_KEY = "price-gap:research-only-treasures";
+const GENRE_FILTER_KEY = "price-gap:research-genre";
+/** 検索条件の一覧で最初に表示する件数（多いときは「残りを表示」で開く） */
+const PRESET_PREVIEW_COUNT = 5;
+
+/** 文字列をファイルとしてダウンロードさせる（Excel で文字化けしないよう BOM を付ける） */
+function downloadCsv(fileName: string, text: string) {
+  const url = URL.createObjectURL(new Blob(["\uFEFF" + text], { type: "text/csv;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 
 type PresetResult = { presetName: string; response: ResearchResponse };
 
@@ -58,8 +84,11 @@ function kindLabel(kind: ResearchKind): string {
 
 type PresetForm = {
   name: string;
+  genre: string;
   kind: ResearchKind;
   keyword: string;
+  jan: string;
+  condition: ItemCondition;
   ngWords: string;
   minPriceJpy: string;
   maxPriceJpy: string;
@@ -72,8 +101,11 @@ function toForm(p: ResearchPreset): PresetForm {
   const str = (n: number | undefined) => (n === undefined ? "" : String(n));
   return {
     name: p.name,
+    genre: p.genre ?? "",
     kind: p.kind,
     keyword: p.keyword,
+    jan: p.jan ?? "",
+    condition: p.condition ?? "new",
     ngWords: p.ngWords.join(" "),
     minPriceJpy: str(p.minPriceJpy),
     maxPriceJpy: str(p.maxPriceJpy),
@@ -83,38 +115,27 @@ function toForm(p: ResearchPreset): PresetForm {
   };
 }
 
-/** フォームの内容を検索条件にする。おかしければエラーメッセージ */
+/** フォームの内容を検索条件にする（/api/research・CSV 読み込みと同じ規則で検査）。おかしければエラーメッセージ */
 function fromForm(id: string, f: PresetForm): ResearchPreset | string {
   if (f.name.trim() === "") return "名前を入力してください。";
-  if (f.keyword.trim().length < 2) return "検索キーワードを 2 文字以上で入力してください。";
-  const optional = (value: string, label: string): number | undefined | string => {
-    if (value.trim() === "") return undefined;
-    const n = toNonNegativeNumber(value);
-    return n === null ? `${label}には 0 以上の数値を入力してください。` : n;
-  };
-  const minPriceJpy = optional(f.minPriceJpy, "最低価格");
-  const maxPriceJpy = optional(f.maxPriceJpy, "最高価格");
-  const intl = optional(f.internationalShippingJpy, "国際送料");
-  const maxLookups = optional(f.maxLookups, "eBay で調べる件数");
-  for (const v of [minPriceJpy, maxPriceJpy, intl, maxLookups]) if (typeof v === "string") return v;
-  if (typeof maxLookups === "number" && (maxLookups < 1 || maxLookups > MAX_LOOKUPS_LIMIT)) {
-    return `eBay で調べる件数は 1〜${MAX_LOOKUPS_LIMIT} にしてください。`;
-  }
-  return {
-    id,
-    name: f.name.trim(),
+  const intl = f.internationalShippingJpy.trim() === "" ? undefined : toNonNegativeNumber(f.internationalShippingJpy);
+  if (intl === null) return "国際送料には 0 以上の数値を入力してください。";
+  const parsed = parseResearchRequest({
     kind: f.kind,
-    keyword: f.keyword.trim(),
-    ngWords: f.ngWords.split(/[\s,、]+/).filter(Boolean),
-    minPriceJpy: minPriceJpy as number | undefined,
-    maxPriceJpy: maxPriceJpy as number | undefined,
-    ebayKeyword: f.ebayKeyword.trim() || undefined,
-    internationalShippingJpy: intl as number | undefined,
-    maxLookups: maxLookups as number | undefined,
-  };
+    keyword: f.keyword,
+    ngWords: f.ngWords.split(/[\s,、]+/),
+    minPriceJpy: f.minPriceJpy.trim(),
+    maxPriceJpy: f.maxPriceJpy.trim(),
+    ebayKeyword: f.ebayKeyword,
+    maxLookups: f.maxLookups.trim(),
+    jan: f.jan,
+    condition: f.condition,
+  });
+  if (typeof parsed === "string") return parsed;
+  return { ...parsed, id, name: f.name.trim(), genre: f.genre.trim() || undefined, internationalShippingJpy: intl };
 }
 
-type Row = { candidate: Candidate; presetName: string; evaluation: Evaluation };
+type Row = { candidate: Candidate; presetName: string; genre?: string; evaluation: Evaluation };
 
 export default function ResearchDashboard() {
   const [settings] = useState<Settings>(() => ({ ...DEFAULT_SETTINGS, ...loadJson<Partial<Settings>>(SETTINGS_KEY) }));
@@ -131,11 +152,27 @@ export default function ResearchDashboard() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [running, setRunning] = useState<{ name: string; index: number; total: number } | null>(null);
   const [editing, setEditing] = useState<{ id: string; form: PresetForm; error?: string } | null>(null);
+  const [genreFilter, setGenreFilter] = useState<string>(() => loadJson<string>(GENRE_FILTER_KEY) ?? "");
+  const [showAllPresets, setShowAllPresets] = useState(false);
+  const [csvMode, setCsvMode] = useState<CsvMode>("merge");
+  const [csvText, setCsvText] = useState("");
+  const [csvImport, setCsvImport] = useState<CsvImportResult | null>(null);
+  const stopRequested = useRef(false);
 
   useEffect(() => saveJson(PRESETS_KEY, presets), [presets]);
   useEffect(() => saveJson(CRITERIA_KEY, criteria), [criteria]);
   useEffect(() => saveJson(RESULTS_KEY, results), [results]);
   useEffect(() => saveJson(ONLY_TREASURES_KEY, onlyTreasures), [onlyTreasures]);
+  useEffect(() => saveJson(GENRE_FILTER_KEY, genreFilter), [genreFilter]);
+
+  // ジャンルの一覧と、選んだジャンルの検索条件（ジャンルが消えていたら「すべて」に戻す）
+  const genres = useMemo(
+    () => [...new Set(presets.map((p) => p.genre).filter((g): g is string => !!g))].sort((a, b) => a.localeCompare(b, "ja")),
+    [presets],
+  );
+  const activeGenre = genres.includes(genreFilter) ? genreFilter : "";
+  const visiblePresets = activeGenre ? presets.filter((p) => p.genre === activeGenre) : presets;
+  const listedPresets = showAllPresets ? visiblePresets : visiblePresets.slice(0, PRESET_PREVIEW_COUNT);
 
   // 全プリセットの結果を評価し、利益の大きい順に並べる（同じ商品は利益の大きい方だけ残す）
   const { rows, noMarket, total } = useMemo(() => {
@@ -143,6 +180,8 @@ export default function ResearchDashboard() {
     let noMarket = 0;
     for (const [presetId, result] of Object.entries(results)) {
       const preset = presets.find((p) => p.id === presetId);
+      // ジャンルで絞っているときは、そのジャンルの検索条件の結果だけ
+      if (activeGenre && preset?.genre !== activeGenre) continue;
       for (const candidate of result.response.candidates) {
         const evaluation = evaluateCandidate(candidate, settings, criteria, preset?.internationalShippingJpy);
         if (!evaluation) {
@@ -151,13 +190,13 @@ export default function ResearchDashboard() {
         }
         const prev = byKey.get(candidate.key);
         if (!prev || evaluation.profit.profitJpy > prev.evaluation.profit.profitJpy) {
-          byKey.set(candidate.key, { candidate, presetName: result.presetName, evaluation });
+          byKey.set(candidate.key, { candidate, presetName: result.presetName, genre: preset?.genre, evaluation });
         }
       }
     }
     const all = [...byKey.values()].sort((a, b) => b.evaluation.profit.profitJpy - a.evaluation.profit.profitJpy);
     return { rows: all, noMarket, total: all.length };
-  }, [results, presets, settings, criteria]);
+  }, [results, presets, settings, criteria, activeGenre]);
 
   const treasures = rows.filter((r) => r.evaluation.isTreasure);
   const visibleRows = onlyTreasures ? treasures : rows;
@@ -186,7 +225,10 @@ export default function ResearchDashboard() {
   }
 
   async function runPresets(targets: ResearchPreset[]) {
+    stopRequested.current = false;
     for (const [index, preset] of targets.entries()) {
+      // 「中止」が押されたら、今の検索条件が終わったところで止める
+      if (stopRequested.current) break;
       setRunning({ name: preset.name, index: index + 1, total: targets.length });
       await runPreset(preset);
     }
@@ -215,6 +257,28 @@ export default function ResearchDashboard() {
       prev.some((p) => p.id === preset.id) ? prev.map((p) => (p.id === preset.id ? preset : p)) : [...prev, preset],
     );
     setEditing(null);
+  }
+
+  async function handleCsvFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setCsvImport(presetsFromCsv(decodeCsvBytes(await file.arrayBuffer()), () => crypto.randomUUID()));
+  }
+
+  function handleApplyCsv() {
+    if (!csvImport) return;
+    if (csvMode === "replace" && !window.confirm(`今の検索条件 ${presets.length} 件を、読み込んだ ${csvImport.presets.length} 件に置き換えますか？`)) {
+      return;
+    }
+    const next = applyImportedPresets(presets, csvImport.presets, csvMode);
+    const ids = new Set(next.map((p) => p.id));
+    setPresets(next);
+    // 消えた検索条件の結果は消す
+    setResults((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => ids.has(id))));
+    setCsvImport(null);
+    setCsvText("");
+    setShowAllPresets(false);
   }
 
   function handleDeletePreset(preset: ResearchPreset) {
@@ -283,18 +347,45 @@ export default function ResearchDashboard() {
       {/* 検索条件（プリセット） */}
       <section className="space-y-3">
         <div className="flex items-center justify-between gap-2">
-          <h2 className="font-semibold">検索条件</h2>
+          <h2 className="font-semibold">
+            検索条件 <span className="text-sm font-normal opacity-60">{visiblePresets.length}件</span>
+          </h2>
           <button
             type="button"
-            onClick={() => setEditing({ id: crypto.randomUUID(), form: toForm({ ...DEFAULT_PRESETS[0], name: "", keyword: "" }) })}
+            onClick={() =>
+              setEditing({
+                id: crypto.randomUUID(),
+                form: toForm({ id: "", name: "", kind: "item", keyword: "", ngWords: [], condition: "new", genre: activeGenre || undefined }),
+              })
+            }
             disabled={busy}
             className="min-h-11 px-2 text-sm underline active:opacity-70 disabled:opacity-40"
           >
             ＋ 追加
           </button>
         </div>
+        {genres.length > 0 && (
+          <label className="flex items-center gap-2 text-sm">
+            <span className="shrink-0">ジャンル</span>
+            <select
+              value={activeGenre}
+              onChange={(e) => {
+                setGenreFilter(e.target.value);
+                setShowAllPresets(false);
+              }}
+              className={INPUT_CLASS}
+            >
+              <option value="">すべて（{presets.length}件）</option>
+              {genres.map((g) => (
+                <option key={g} value={g}>
+                  {g}（{presets.filter((p) => p.genre === g).length}件）
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <ul className="space-y-2">
-          {presets.map((preset) => {
+          {listedPresets.map((preset) => {
             const result = results[preset.id];
             return (
               <li key={preset.id} className="rounded-lg border border-black/10 p-3 dark:border-white/15">
@@ -302,7 +393,10 @@ export default function ResearchDashboard() {
                   <div className="min-w-0 flex-1">
                     <div className="font-medium">{preset.name}</div>
                     <div className="truncate text-xs opacity-60">
-                      {kindLabel(preset.kind)} ・「{preset.keyword}」
+                      {preset.genre && `${preset.genre} ・ `}
+                      {kindLabel(preset.kind)}
+                      {preset.kind === "item" && `（${ITEM_CONDITIONS.find((c) => c.id === (preset.condition ?? "new"))?.label}）`} ・「
+                      {preset.keyword || `JAN ${preset.jan}`}」
                       {result && ` ・ ${dateTime.format(new Date(result.response.fetchedAt))} 取得`}
                     </div>
                   </div>
@@ -339,6 +433,11 @@ export default function ResearchDashboard() {
             );
           })}
         </ul>
+        {visiblePresets.length > PRESET_PREVIEW_COUNT && (
+          <button type="button" onClick={() => setShowAllPresets(!showAllPresets)} className="min-h-11 px-2 text-sm underline opacity-80">
+            {showAllPresets ? "折りたたむ" : `残り ${visiblePresets.length - PRESET_PREVIEW_COUNT} 件を表示`}
+          </button>
+        )}
 
         {editing && (
           <PresetEditor
@@ -350,17 +449,44 @@ export default function ResearchDashboard() {
           />
         )}
 
-        <button
-          type="button"
-          onClick={() => runPresets(presets)}
-          disabled={busy || presets.length === 0}
-          className="min-h-12 w-full rounded-lg bg-foreground px-6 text-base font-medium text-background active:opacity-80 disabled:opacity-50 sm:w-auto"
-        >
-          {running ? `「${running.name}」を検索中…（${running.index}/${running.total}）` : "すべての条件でリサーチ"}
-        </button>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <button
+            type="button"
+            onClick={() => runPresets(visiblePresets)}
+            disabled={busy || visiblePresets.length === 0}
+            className="min-h-12 w-full rounded-lg bg-foreground px-6 text-base font-medium text-background active:opacity-80 disabled:opacity-50 sm:w-auto"
+          >
+            {running
+              ? `「${running.name}」を検索中…（${running.index}/${running.total}）`
+              : `${activeGenre ? `「${activeGenre}」の` : "すべての"}条件でリサーチ（${visiblePresets.length}件）`}
+          </button>
+          {running && (
+            <button
+              type="button"
+              onClick={() => (stopRequested.current = true)}
+              className="min-h-12 rounded-lg border border-red-600/60 px-6 text-base text-red-600 active:opacity-70"
+            >
+              中止
+            </button>
+          )}
+        </div>
         <p className="text-xs opacity-60">
-          1 つの条件につき 10〜30 秒ほどかかります。eBay の相場は出品中（即決）の価格です（落札履歴は eBay の API の制限で取得できないため、各商品の「eBay 落札済み」から確認できます）。
+          1 つの条件につき 5〜30 秒ほどかかります（商品指定は 1 商品なので速め）。eBay の相場は出品中（即決）の価格です（落札履歴は eBay の API の制限で取得できないため、各商品の「eBay 落札済み」から確認できます）。
         </p>
+
+        <CsvTools
+          presets={presets}
+          mode={csvMode}
+          onModeChange={setCsvMode}
+          text={csvText}
+          onTextChange={setCsvText}
+          onParseText={() => setCsvImport(presetsFromCsv(csvText, () => crypto.randomUUID()))}
+          onFile={handleCsvFile}
+          preview={csvImport}
+          onApply={handleApplyCsv}
+          onCancel={() => setCsvImport(null)}
+          disabled={busy}
+        />
       </section>
 
       {allWarnings.length > 0 && (
@@ -442,12 +568,14 @@ function PresetEditor({
 }) {
   const set = (key: keyof PresetForm) => (value: string) => onChange({ ...form, [key]: value });
   const kindHint = RESEARCH_KINDS.find((k) => k.id === form.kind)?.hint;
+  const isItem = form.kind === "item";
   return (
     <form onSubmit={onSubmit} className="space-y-3 rounded-lg border border-black/20 p-4 dark:border-white/25">
       <h3 className="font-semibold">検索条件の編集</h3>
       <div className="grid gap-3 sm:grid-cols-2">
         <TextField label="名前 *" value={form.name} onChange={set("name")} />
-        <label className="flex min-w-0 flex-col gap-1 text-sm">
+        <TextField label="ジャンル（例: カメラ・釣具）" value={form.genre} onChange={set("genre")} />
+        <label className="flex min-w-0 flex-col gap-1 text-sm sm:col-span-2">
           <span>種類</span>
           <select value={form.kind} onChange={(e) => set("kind")(e.target.value)} className={INPUT_CLASS}>
             {RESEARCH_KINDS.map((k) => (
@@ -459,17 +587,53 @@ function PresetEditor({
           {kindHint && <span className="text-xs opacity-60">{kindHint}</span>}
         </label>
         <div className="sm:col-span-2">
-          <TextField label="楽天・Yahoo! の検索キーワード *" value={form.keyword} onChange={set("keyword")} />
+          <TextField
+            label={isItem ? "楽天・Yahoo! の検索キーワード（JAN があれば省略可）" : "楽天・Yahoo! の検索キーワード *"}
+            value={form.keyword}
+            onChange={set("keyword")}
+          />
+          {isItem && (
+            <p className="mt-1 text-xs opacity-60">
+              タイトルにキーワードの単語がすべて含まれる商品だけを比べます（例:「ニコン F3 ボディ」）。
+            </p>
+          )}
         </div>
+        {isItem && (
+          <>
+            <div className="sm:col-span-2">
+              <TextField label="eBay 用の英語キーワード（JAN がなければ必須）" value={form.ebayKeyword} onChange={set("ebayKeyword")} />
+              <p className="mt-1 text-xs opacity-60">
+                eBay の出品タイトルに単語がすべて含まれるものだけを比べます（例: Nikon F3 body）。JAN があるときは、JAN で見つからなかったときに使います。
+              </p>
+            </div>
+            <TextField label="JAN コード（任意）" value={form.jan} onChange={set("jan")} />
+            <label className="flex min-w-0 flex-col gap-1 text-sm">
+              <span>状態</span>
+              <select value={form.condition} onChange={(e) => set("condition")(e.target.value)} className={INPUT_CLASS}>
+                {ITEM_CONDITIONS.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
         <div className="sm:col-span-2">
           <TextField label="除外ワード（スペース区切り）" value={form.ngWords} onChange={set("ngWords")} />
-          <p className="mt-1 text-xs opacity-60">オリパ・くじ・スリーブなどの周辺グッズ・予約品は最初から除外しています。</p>
+          <p className="mt-1 text-xs opacity-60">
+            {isItem
+              ? "ジャンク・部品取り・故障・難あり・予約品などは最初から除外しています。"
+              : "オリパ・くじ・スリーブなどの周辺グッズ・予約品は最初から除外しています。"}
+          </p>
         </div>
         <div className="grid grid-cols-2 gap-3 sm:col-span-2">
           <NumberField label="最低価格（円）" value={form.minPriceJpy} onChange={set("minPriceJpy")} />
           <NumberField label="最高価格（円）" value={form.maxPriceJpy} onChange={set("maxPriceJpy")} />
           <NumberField label="国際送料（円）" value={form.internationalShippingJpy} onChange={set("internationalShippingJpy")} />
-          <NumberField label={`eBay で調べる件数（最大 ${MAX_LOOKUPS_LIMIT}）`} value={form.maxLookups} onChange={set("maxLookups")} />
+          {!isItem && (
+            <NumberField label={`eBay で調べる件数（最大 ${MAX_LOOKUPS_LIMIT}）`} value={form.maxLookups} onChange={set("maxLookups")} />
+          )}
         </div>
         {(form.kind === "sealed" || form.kind === "other") && (
           <div className="sm:col-span-2">
@@ -480,7 +644,7 @@ function PresetEditor({
           </div>
         )}
       </div>
-      <p className="text-xs opacity-60">未入力の eBay 調査件数は {DEFAULT_MAX_LOOKUPS} 件です。</p>
+      {!isItem && <p className="text-xs opacity-60">未入力の eBay 調査件数は {DEFAULT_MAX_LOOKUPS} 件です。</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
       <div className="flex gap-2">
         <button type="submit" className="min-h-12 flex-1 rounded-lg bg-foreground px-6 text-base font-medium text-background active:opacity-80 sm:flex-none">
@@ -491,6 +655,136 @@ function PresetEditor({
         </button>
       </div>
     </form>
+  );
+}
+
+function CsvTools({
+  presets,
+  mode,
+  onModeChange,
+  text,
+  onTextChange,
+  onParseText,
+  onFile,
+  preview,
+  onApply,
+  onCancel,
+  disabled,
+}: {
+  presets: ResearchPreset[];
+  mode: CsvMode;
+  onModeChange: (mode: CsvMode) => void;
+  text: string;
+  onTextChange: (text: string) => void;
+  onParseText: () => void;
+  onFile: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  preview: CsvImportResult | null;
+  onApply: () => void;
+  onCancel: () => void;
+  disabled: boolean;
+}) {
+  const existingNames = new Set(presets.map((p) => p.name));
+  const updates = preview && mode === "merge" ? preview.presets.filter((p) => existingNames.has(p.name)).length : 0;
+  const secondaryButton =
+    "flex min-h-12 items-center justify-center rounded-lg border border-black/25 px-3 text-center text-sm active:opacity-70 dark:border-white/30";
+
+  return (
+    <details className="group rounded-lg border border-black/10 dark:border-white/15">
+      <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-2 px-4 py-2 [&::-webkit-details-marker]:hidden">
+        <span className="font-semibold">CSV でまとめて登録・書き出し</span>
+        <span aria-hidden className="text-sm opacity-70 transition-transform group-open:rotate-180">
+          ▼
+        </span>
+      </summary>
+      <div className="space-y-3 border-t border-black/10 p-4 text-sm dark:border-white/15">
+        <p className="text-xs opacity-70">
+          1 行 = 1 つの検索条件です。見出しは「名前・ジャンル・種類・検索キーワード・JAN・eBayキーワード・状態・除外ワード・最低価格・最高価格・国際送料・eBay調査件数」（名前以外は省略可）。
+          Excel で保存した CSV（Shift_JIS）もそのまま読めます。まずテンプレートをダウンロードして書き換えるのがおすすめです。
+        </p>
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" onClick={() => downloadCsv("research-template.csv", CSV_TEMPLATE)} className={secondaryButton}>
+            テンプレート
+          </button>
+          <button
+            type="button"
+            onClick={() => downloadCsv(`research-presets-${new Date().toISOString().slice(0, 10)}.csv`, presetsToCsv(presets))}
+            disabled={presets.length === 0}
+            className={`${secondaryButton} disabled:opacity-40`}
+          >
+            今の条件を書き出す（{presets.length}件）
+          </button>
+        </div>
+
+        <fieldset className="space-y-1">
+          <legend className="mb-1 text-xs opacity-70">読み込み方</legend>
+          {(
+            [
+              ["merge", "追加（同じ名前の条件は上書き）"],
+              ["replace", "すべて置き換え"],
+            ] as const
+          ).map(([value, label]) => (
+            <label key={value} className="flex min-h-11 items-center gap-2">
+              <input type="radio" name="csv-mode" checked={mode === value} onChange={() => onModeChange(value)} className="h-5 w-5" />
+              {label}
+            </label>
+          ))}
+        </fieldset>
+
+        <label className={`${secondaryButton} cursor-pointer bg-foreground font-medium text-background ${disabled ? "pointer-events-none opacity-40" : ""}`}>
+          CSV ファイルを選んで読み込む
+          <input type="file" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values" onChange={onFile} className="sr-only" disabled={disabled} />
+        </label>
+
+        <details>
+          <summary className="flex min-h-11 cursor-pointer items-center text-xs underline opacity-70">または、表を貼り付けて読み込む</summary>
+          <textarea
+            value={text}
+            onChange={(e) => onTextChange(e.target.value)}
+            rows={5}
+            placeholder={"名前,ジャンル,検索キーワード,eBayキーワード,状態\nBOSS DS-1,エフェクター,BOSS DS-1,Boss DS-1,中古"}
+            className="mt-1 w-full rounded-lg border border-black/20 bg-transparent p-3 font-mono text-base dark:border-white/25"
+          />
+          <button type="button" onClick={onParseText} disabled={disabled || text.trim() === ""} className={`${secondaryButton} mt-2 w-full disabled:opacity-40`}>
+            貼り付けた内容を読み込む
+          </button>
+        </details>
+
+        {preview && (
+          <div className="space-y-2 rounded-lg border border-black/20 p-3 dark:border-white/25" role="status">
+            <p className="font-medium">
+              読み込める条件 {preview.presets.length} 件
+              {mode === "merge" && `（新規 ${preview.presets.length - updates} 件・上書き ${updates} 件）`}
+              {preview.errors.length > 0 && <span className="text-red-600"> ／ 読み込めない行 {preview.errors.length} 件</span>}
+            </p>
+            {preview.errors.length > 0 && (
+              <ul className="max-h-48 space-y-0.5 overflow-y-auto text-xs text-red-600">
+                {preview.errors.map((e) => (
+                  <li key={`${e.line}-${e.message}`}>
+                    {e.line} 行目: {e.message}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {preview.ignoredColumns.length > 0 && (
+              <p className="text-xs opacity-70">知らない列は読み飛ばしました: {preview.ignoredColumns.join("、")}</p>
+            )}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={onApply}
+                disabled={preview.presets.length === 0}
+                className="min-h-12 flex-1 rounded-lg bg-foreground px-4 text-base font-medium text-background active:opacity-80 disabled:opacity-40"
+              >
+                {mode === "replace" ? "置き換える" : "登録する"}
+              </button>
+              <button type="button" onClick={onCancel} className="min-h-12 rounded-lg border border-black/30 px-4 text-base dark:border-white/30">
+                やめる
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -540,7 +834,7 @@ function CandidateCard({ row, criteria }: { row: Row; criteria: TreasureCriteria
         <div className="min-w-0 flex-1">
           <div className="text-xs opacity-60">
             {evaluation.isTreasure && <span className="mr-1 rounded bg-green-600 px-1 font-semibold text-white">お宝</span>}
-            {candidate.label} ・ {presetName}
+            {[candidate.label, row.genre, presetName].filter(Boolean).join(" ・ ")}
           </div>
           <div className="line-clamp-2 text-sm font-medium break-words">{offer.title}</div>
         </div>

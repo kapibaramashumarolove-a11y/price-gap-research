@@ -1,7 +1,7 @@
 // 商品タイトルから「同じ商品」を見分けるための識別子（JAN・カード番号・型番）を取り出し、
 // eBay で相場を調べるための検索条件を作る。通信はしない純粋な関数だけを置く。
 
-import type { ResearchKind } from "./researchTypes";
+import type { ItemCondition, ResearchKind } from "./researchTypes";
 
 // ---- 文字の正規化 ----
 
@@ -100,6 +100,9 @@ export function identify(kind: ResearchKind, text: string, jan?: string): Identi
       const model = extractModelNumber(text);
       return model ? { key: `model:${model}`, label: model, modelNumber: model } : undefined;
     }
+    case "item":
+      // 商品指定は検索条件そのものが 1 つの商品なので、タイトルからの識別はしない
+      return undefined;
   }
 }
 
@@ -122,12 +125,15 @@ const COMMON_NG_WORDS = [
   "まとめ売り",
 ];
 
+/** 商品指定（カメラ・釣具など）で除外する言葉（壊れている・部品用・予約など、相場の比較にならないもの） */
+const ITEM_NG_WORDS = ["ジャンク", "部品取り", "故障", "動作未確認", "難あり", "訳あり", "訳アリ", "予約", "代行", "レンタル"];
+
 const SEALED_NG_WORDS = ["開封済", "中古", "シュリンクなし", "シュリンク無し", "訳あり", "訳アリ", "カートン", "パック単品", "バラ"];
 
 /** 種類ごとの除外ルールに当てはまるか（当てはまれば除外する） */
 export function isExcludedOffer(kind: ResearchKind, title: string, ngWords: readonly string[] = []): boolean {
   const t = normalizeText(title);
-  const words = [...COMMON_NG_WORDS, ...ngWords.map(normalizeText).filter(Boolean)];
+  const words = [...(kind === "item" ? ITEM_NG_WORDS : COMMON_NG_WORDS), ...ngWords.map(normalizeText).filter(Boolean)];
   if (kind === "sealed") words.push(...SEALED_NG_WORDS);
   if (words.some((w) => t.includes(w))) return true;
 
@@ -232,7 +238,73 @@ export function planEbaySearch(kind: ResearchKind, identity: Identity): EbaySear
         };
       }
       return undefined;
+    case "item":
+      // 商品指定は planItemEbaySearch を使う
+      return undefined;
   }
+}
+
+// ---- 商品指定（1 つの検索条件 = 1 つの商品）----
+
+/** キーワードを単語に分ける（全角・半角や大文字・小文字の違いは無視） */
+export function keywordTokens(keyword: string): string[] {
+  return normalizeText(keyword).toLowerCase().split(" ").filter(Boolean);
+}
+
+/** タイトルにキーワードの単語がすべて含まれるか（楽天・Yahoo!・eBay の検索はあいまいなので、ここで絞る） */
+export function containsAllTokens(title: string, tokens: readonly string[]): boolean {
+  const t = normalizeText(title).toLowerCase();
+  return tokens.every((token) => t.includes(token));
+}
+
+/**
+ * 状態ごとの eBay コンディション ID。
+ * 中古は 1500（開封品）・2750（ほぼ新品）・3000（中古）・4000〜6000（状態の良い順）。7000（ジャンク）は含めない。
+ */
+export function itemConditionIds(condition: ItemCondition): string[] {
+  const used = ["1500", "2750", "3000", "4000", "5000", "6000"];
+  if (condition === "new") return ["1000"];
+  if (condition === "used") return used;
+  return ["1000", ...used];
+}
+
+/** 部品取り・動作不良・箱や説明書だけ・まとめ売りなど、本体 1 台の相場にならない出品 */
+const EBAY_ITEM_EXCLUDE =
+  /\bfor parts\b|\bnot working\b|\bjunk\b|\bbroken\b|\bas[- ]is\b|\b(box|case|manual|cover) only\b|\bempty box\b|\blot\b|\bbundle\b|\breplica\b/i;
+/** 本体ではなく部品・付属品の出品によく出る言葉 */
+const EBAY_ACCESSORY =
+  /\b(drag washers?|washers?|screws?|knobs?|part no|parts only|replacement|repair parts?|power supply|ac adapter|adapter|cables?|decals?|stickers?)\b/i;
+
+/**
+ * 商品指定の eBay 検索。JAN があれば JAN（GTIN）で、なければ英語キーワードで探す。
+ * キーワード検索のときは、キーワードの単語をすべて含む出品だけを集計する。
+ * @returns 先に試す検索と、JAN で見つからなかったときのキーワード検索（なければ undefined）
+ */
+export function planItemEbaySearch(params: {
+  jan?: string;
+  ebayKeyword?: string;
+  condition: ItemCondition;
+}): { primary: EbaySearchPlan; fallback?: EbaySearchPlan } | undefined {
+  const conditionIds = itemConditionIds(params.condition);
+  const keyword = params.ebayKeyword?.trim();
+  const keywordPlan: EbaySearchPlan | undefined = keyword
+    ? {
+        q: keyword,
+        conditionIds,
+        webQuery: keyword,
+        titleFilter: (t) => containsAllTokens(t, keywordTokens(keyword)) && !EBAY_ITEM_EXCLUDE.test(t) && !EBAY_ACCESSORY.test(t),
+      }
+    : undefined;
+  if (params.jan) {
+    const primary: EbaySearchPlan = {
+      gtin: params.jan,
+      conditionIds,
+      webQuery: keyword || params.jan,
+      titleFilter: (t) => !EBAY_ITEM_EXCLUDE.test(t) && !EBAY_ACCESSORY.test(t),
+    };
+    return { primary, fallback: keywordPlan };
+  }
+  return keywordPlan ? { primary: keywordPlan } : undefined;
 }
 
 /** eBay サイトの検索リンク。出品中は即決のみ、落札済みはオークションも含める */
