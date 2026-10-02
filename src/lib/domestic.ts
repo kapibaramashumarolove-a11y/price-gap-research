@@ -58,11 +58,13 @@ export function isRakutenConfigured(env: Record<string, string | undefined> = pr
 }
 
 /**
- * 楽天に送る Referer / Origin。RAKUTEN_SITE_URL があればそれを、なければこのサイト自身の URL を使う。
- * （楽天のアプリ設定の「許可されたWebサイト」と一致している必要がある）
+ * 楽天に送る Referer / Origin（楽天のアプリ設定の「許可されたWebサイト」と一致している必要がある）。
+ * 優先順: RAKUTEN_SITE_URL → Vercel の本番 URL（VERCEL_PROJECT_PRODUCTION_URL、Vercel が自動で設定）→ 開いている URL。
+ * Vercel ではデプロイごとに URL（例: price-gap-research-c2i9bcd5a-….vercel.app）が変わるため、
+ * 開いている URL ではなく、変わらない本番 URL を優先する。
  */
 export function rakutenSiteOrigin(siteOrigin: string | undefined, env: Record<string, string | undefined>): string | undefined {
-  const raw = cleanEnvValue(env.RAKUTEN_SITE_URL) || siteOrigin;
+  const raw = cleanEnvValue(env.RAKUTEN_SITE_URL) || cleanEnvValue(env.VERCEL_PROJECT_PRODUCTION_URL) || siteOrigin;
   if (!raw) return undefined;
   try {
     return new URL(raw.includes("://") ? raw : `https://${raw}`).origin;

@@ -54,9 +54,22 @@ describe("searchRakuten", () => {
     expect(offers[1].shipping).toBe("extra");
   });
 
-  it("RAKUTEN_SITE_URL があれば Referer / Origin に使う", async () => {
+  it("Vercel では、デプロイごとに変わる URL ではなく本番 URL を送る", async () => {
     const fetchFn = vi.fn<typeof fetch>(async () => jsonResponse({ Items: [] }));
-    await searchRakuten({ ...params, siteOrigin: "https://preview.vercel.app" }, { ...env, RAKUTEN_SITE_URL: "my-site.vercel.app" }, fetchFn);
+    await searchRakuten(
+      { ...params, siteOrigin: "https://price-gap-research-c2i9bcd5a-me.vercel.app" },
+      { ...env, VERCEL_PROJECT_PRODUCTION_URL: "price-gap-research-me.vercel.app" },
+      fetchFn,
+    );
+    expect(fetchFn.mock.calls[0][1]?.headers).toMatchObject({
+      Referer: "https://price-gap-research-me.vercel.app/",
+      Origin: "https://price-gap-research-me.vercel.app",
+    });
+  });
+
+  it("RAKUTEN_SITE_URL があれば最優先で Referer / Origin に使う", async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () => jsonResponse({ Items: [] }));
+    await searchRakuten({ ...params, siteOrigin: "https://preview.vercel.app" }, { ...env, RAKUTEN_SITE_URL: "my-site.vercel.app", VERCEL_PROJECT_PRODUCTION_URL: "other.vercel.app" }, fetchFn);
     expect(fetchFn.mock.calls[0][1]?.headers).toMatchObject({ Origin: "https://my-site.vercel.app" });
   });
 

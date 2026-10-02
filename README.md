@@ -114,7 +114,7 @@ URL を知っている第三者に eBay API の利用枠を使われないよう
 |---|---|
 | `RAKUTEN_APP_ID` | 楽天ウェブサービスのアプリケーション ID |
 | `RAKUTEN_ACCESS_KEY` | 楽天ウェブサービスのアクセスキー（`RAKUTEN_APP_ID` と同じアプリのもの） |
-| `RAKUTEN_SITE_URL` | （任意）楽天の「許可されたWebサイト」に登録した URL。未設定ならこのサイト自身の URL を使います |
+| `RAKUTEN_SITE_URL` | （任意）楽天の「許可されたWebサイト」に登録した URL。未設定なら Vercel の本番 URL を使います |
 | `RAKUTEN_AFFILIATE_ID` | （任意）楽天アフィリエイト ID |
 | `YAHOO_CLIENT_ID` | Yahoo!デベロッパーネットワークの Client ID |
 
@@ -125,7 +125,7 @@ URL を知っている第三者に eBay API の利用枠を使われないよう
 楽天の旧 API（`app.rakuten.co.jp`）は 2026 年 5 月に停止しました。このアプリは新しい API（`openapi.rakuten.co.jp`）を使い、次の 3 つがそろって初めて動きます。
 
 1. [楽天ウェブサービス](https://webservice.rakuten.co.jp/) で新しくアプリを登録し、**アプリケーション ID** と **アクセスキー** を取得する（移行前に作ったアプリの ID は使えません）。
-2. アプリ設定の **「許可されたWebサイト」** に、このアプリを公開している URL（例: `https://〇〇.vercel.app`）を登録する。アプリは楽天に `Referer` / `Origin` ヘッダーとしてこの URL を送ります。
+2. アプリ設定の **「許可されたWebサイト」** に、Vercel の**本番の URL**（Vercel の Settings → Domains に出ている、`https://〇〇.vercel.app` のような変わらない URL）を登録する。アプリは楽天に `Referer` / `Origin` ヘッダーとしてこの URL を送ります。Vercel がデプロイごとに作る URL（`〇〇-c2i9bcd5a-….vercel.app` のように途中に英数字が入るもの）は毎回変わるので登録しても使えません。アプリは Vercel が自動で設定する `VERCEL_PROJECT_PRODUCTION_URL`（本番の URL）を優先して送ります。別の URL を送りたい場合は `RAKUTEN_SITE_URL` で指定できます。
 3. Vercel の環境変数に `RAKUTEN_APP_ID` と `RAKUTEN_ACCESS_KEY` を登録して Redeploy する。
 
 エラーが出たときは、画面の注意に原因（アクセスキー違い・アプリ ID 違い・許可されたWebサイト未登録など）と直し方が表示されます。
