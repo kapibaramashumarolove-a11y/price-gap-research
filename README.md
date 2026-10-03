@@ -180,7 +180,7 @@ Excel で JAN の列が `4.52E+12` のように表示されたまま保存する
 楽天の「Webアプリケーション」はブラウザから直接呼ぶ前提の仕組みなので、このアプリは**楽天だけはスマホ・パソコンのブラウザから直接検索**し、その結果をサーバーに渡します（Yahoo! と eBay はサーバーから呼びます）。ブラウザが今開いているサイトの URL を自動で送るので、サーバーから送るときのような URL のずれが起きません。
 
 1. [楽天ウェブサービス](https://webservice.rakuten.co.jp/) で新しくアプリを登録し、**アプリケーション ID** と **アクセスキー** を取得する（移行前に作ったアプリの ID は使えません）。
-2. アプリ設定の **「許可されたWebサイト」** に、**ふだんスマホで開いている URL**（例: `https://〇〇.vercel.app`）を登録する。
+2. アプリ設定の **「許可されたWebサイト」** に、Vercel の **本番の URL**（Vercel の Settings → Domains に出ている、変わらない URL）を登録する。Vercel がデプロイごとに作る URL（`price-gap-research-86nf2ix1j-….vercel.app` のように途中に英数字が入るもの）は更新のたびに変わるため、登録しても次の更新で使えなくなります。このアプリは、デプロイごとの URL で開かれると自動で本番の URL へ移ります（`VERCEL_ENV=production` のときだけ。Vercel が自動で設定する `VERCEL_PROJECT_PRODUCTION_URL` を使います）。
 3. Vercel の環境変数に `RAKUTEN_APP_ID` と `RAKUTEN_ACCESS_KEY` を登録して Redeploy する。
 
 - 楽天のキーは、合言葉でログインしたブラウザにだけ `/api/rakuten/credentials` から渡します。楽天のキーは登録したサイトからしか使えないため、ブラウザに渡すのは楽天が想定している使い方です。
@@ -243,6 +243,7 @@ Excel で JAN の列が `4.52E+12` のように表示されたまま保存する
 | `src/lib/researchProfit.ts` | 利益の計算とお宝の判定（画面側） |
 | `src/lib/researchTypes.ts` / `src/lib/researchRequest.ts` | 自動リサーチの型・初期の検索条件・入力チェック |
 | `src/lib/presetCsv.ts` | 検索条件の CSV 読み込み・書き出し・テンプレート |
+| `src/lib/canonicalHost.ts` | デプロイごとの URL で開かれたときに本番 URL へ移す判定 |
 | `src/lib/quickInput.ts` | 「型番・商品名で調べる」の入力の読み取り |
 | `src/lib/rakuten.ts` | 楽天 API の呼び出し方・結果の読み取り（ブラウザ・サーバー共通） |
 | `src/app/api/rakuten/credentials/route.ts` | ログイン済みのブラウザに楽天のキーを渡す API |
