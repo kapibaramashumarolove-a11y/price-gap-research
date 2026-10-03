@@ -1,12 +1,8 @@
 # price-gap-research
 
-スニダン（SNKRDUNK）や楽天・Yahoo!ショッピングで仕入れて eBay で販売した場合の利益を計算する Web アプリです。
+楽天市場・Yahoo!ショッピングで仕入れて eBay で販売した場合の利益を調べる Web アプリです。
 
-- **自動リサーチ**（`/research`）: 楽天・Yahoo! の商品を公式 API で一括取得し、JAN コードやカード番号で同じ商品を見分けて eBay の相場と照合し、利益の条件を満たす「お宝商品」を一覧にします。
-- **手入力で計算**（`/`）: スニダンで確認した価格などを手入力して利益を計算します。
-
-- スニダンの情報は、利用規約（クローリング・スクレイピングの禁止）に従い **自動取得しません**。スニダンで確認した価格を手入力します。
-- eBay の価格は、公式の [Browse API](https://developer.ebay.com/api-docs/buy/browse/overview.html) で「出品中（即決）の価格」の中央値・最安値・件数を取得して使えます（手入力も可）。API はサーバー側だけで呼び出し、キーはブラウザに送りません。
+楽天・Yahoo! の商品を公式 API で一括取得し、JAN コード・カード番号・検索キーワードで同じ商品を見分けて eBay の相場（公式 [Browse API](https://developer.ebay.com/api-docs/buy/browse/overview.html) の出品中価格）と照合し、利益の条件を満たす「お宝商品」を一覧にします。
 
 ## 必要なもの
 
@@ -21,7 +17,7 @@ npm run dev      # 開発用サーバーを起動
 
 ブラウザで http://localhost:3000 を開きます。止めるときはターミナルで `Ctrl + C` を押します。
 
-入力したデータは、そのブラウザの中（localStorage）だけに保存されます。
+検索条件・お宝の条件・計算条件・最後の結果は、そのブラウザの中（localStorage）だけに保存されます。
 
 ## eBay API キーの設定
 
@@ -71,7 +67,7 @@ URL を知っている第三者に eBay API の利用枠を使われないよう
 
 ## 自動リサーチ（楽天・Yahoo! × eBay）
 
-画面上部の「自動リサーチ」タブで使います。
+トップページ（`/`）が自動リサーチの画面です（以前の `/research` を開いた場合もトップページに移ります）。
 
 ### 流れ
 
@@ -96,7 +92,7 @@ URL を知っている第三者に eBay API の利用枠を使われないよう
 
    - eBay 売価: 「お宝の条件」で選んだ値（初期値は安い方から 25%。出品中価格の中央値は実際に売れる価格より高めに出やすいため）
    - 国内最安値: 楽天・Yahoo! のうち送料込みで一番安いもの。送料別・条件付きの場合は「送料別のときの国内送料」（初期値 800 円）を足します
-   - 為替・eBay 手数料: 「手入力で計算」の計算条件と共通
+   - 為替・eBay 手数料: 画面の「計算条件」で変更
    - 国際送料: 検索条件ごとに設定（初期値: BOX 3,000 円・PSA10 2,000 円・シングル 1,500 円）
 6. **お宝の判定**: 利益（初期値 3,000 円以上）・利益率（15% 以上）・eBay の比較件数（3 件以上。少ないと相場が当てにならないため）をすべて満たすもの。各商品には楽天・Yahoo! の購入リンク、eBay の出品中・落札済みの検索リンクを付けています。
 
@@ -186,32 +182,6 @@ Excel で JAN の列が `4.52E+12` のように表示されたまま保存する
 - 楽天のキーは、合言葉でログインしたブラウザにだけ `/api/rakuten/credentials` から渡します。楽天のキーは登録したサイトからしか使えないため、ブラウザに渡すのは楽天が想定している使い方です。
 - エラーのときは画面の注意に、原因（アクセスキー違い・アプリ ID 違い・許可されたWebサイト未登録など）と、楽天に送ったサイト URL が表示されます。その URL を「許可されたWebサイト」に登録してください。
 
-## eBay の相場取得の使い方
-
-1. 「仕入れ候補を追加」で型番（なければ商品名）とサイズを入力します。
-2. 「eBay の出品中価格を取得」を押すと、米国 eBay（USD）の**新品**の即決出品を最大 100 件検索し、中央値・最安値・件数を表示します。
-3. 「販売価格に使う」を押すと、その値が「eBay 販売価格 (USD)」に入ります。
-
-オークション出品は「現在の入札額」が実際の売値とかけ離れやすいので除外しています。中古が混ざると中央値が大きく下がるため、既定では新品（コンディション ID `1000`）だけに絞っています。出品中の価格であり、実際に売れた価格ではない点に注意してください。
-
-サーバーの API は `GET /api/ebay/search?q=キーワード` で、次のような JSON を返します。
-
-```json
-{ "query": "nike", "environment": "production", "conditionIds": ["1000"], "total": 302, "count": 100, "median": 24.99, "min": 9.99, "fetchedAt": "..." }
-```
-
-商品の状態は `condition` で変えられます（カンマ区切りで複数可）。使える ID と画面用の名前は `src/lib/ebayConditions.ts` にまとめてあり、将来ここから画面の選択肢を作れます。
-
-| 指定 | 意味 |
-|---|---|
-| なし | 新品のみ（`1000`） |
-| `&condition=1000,1500` | 新品＋新品（その他・箱なし等） |
-| `&condition=3000` | 中古 |
-| `&condition=2750,4000` | トレーディングカード（ポケモンカードなど）の鑑定済み＋未鑑定 |
-| `&condition=all` | 状態で絞り込まない |
-
-同じ ID でもカテゴリによって意味が変わるものがあります（例：トレーディングカードでは `2750` が鑑定済み、`4000` が未鑑定）。
-
 `.env.local` は `.gitignore` で除外されているため GitHub にはアップロードされません。キーをチャットやコードに直接書かないでください。
 
 ## 開発用コマンド
@@ -219,7 +189,7 @@ Excel で JAN の列が `4.52E+12` のように表示されたまま保存する
 | コマンド | 内容 |
 |---|---|
 | `npm run dev` | 開発用サーバーを起動（ファイルを保存すると自動で反映） |
-| `npm test` | 利益計算・eBay 連携のテストを実行 |
+| `npm test` | テストを実行（利益計算・識別・楽天/Yahoo!/eBay 連携・CSV など） |
 | `npm run lint` | コードの書き方をチェック |
 | `npm run typecheck` | 型のチェック |
 | `npm run build` | 本番用にビルド |
@@ -232,10 +202,8 @@ Excel で JAN の列が `4.52E+12` のように表示されたまま保存する
 | `src/lib/profit.test.ts` | 利益計算のテスト |
 | `src/lib/ebay.ts` | eBay Browse API の呼び出しと価格の集計（サーバー専用） |
 | `src/lib/ebay.test.ts` | eBay 連携のテスト（通信はダミー） |
-| `src/lib/ebayConditions.ts` | eBay の商品状態（コンディション ID）の一覧と既定値（新品） |
-| `src/lib/ebayConditions.test.ts` | コンディション指定のテスト |
-| `src/app/api/ebay/search/route.ts` | 画面から呼ぶ API（`/api/ebay/search`） |
-| `src/app/research/page.tsx` / `src/components/ResearchDashboard.tsx` | 自動リサーチの画面（`/research`） |
+| `src/app/page.tsx` / `src/components/ResearchDashboard.tsx` | 自動リサーチの画面（トップページ `/`） |
+| `src/components/ClientOnlyResearch.tsx` | 画面をブラウザだけで表示するための入れ物 |
 | `src/app/api/research/route.ts` | 自動リサーチの API（`POST /api/research`） |
 | `src/lib/research.ts` | 自動リサーチ本体（国内検索 → 除外・識別 → eBay 照合） |
 | `src/lib/domestic.ts` | 楽天・Yahoo!ショッピングの API 呼び出し（サーバー専用） |
@@ -247,26 +215,23 @@ Excel で JAN の列が `4.52E+12` のように表示されたまま保存する
 | `src/lib/quickInput.ts` | 「型番・商品名で調べる」の入力の読み取り |
 | `src/lib/rakuten.ts` | 楽天 API の呼び出し方・結果の読み取り（ブラウザ・サーバー共通） |
 | `src/app/api/rakuten/credentials/route.ts` | ログイン済みのブラウザに楽天のキーを渡す API |
-| `src/components/AppNav.tsx` / `src/components/Fields.tsx` | 画面上部のタブ・入力欄の共通部品 |
+| `src/components/Fields.tsx` | 入力欄の共通部品 |
 | `src/lib/auth.ts` | 合言葉のチェックとログイン用 Cookie（サーバー専用） |
 | `src/lib/auth.test.ts` | 合言葉まわりのテスト |
 | `src/proxy.ts` | 全ページ・API の前でログイン済みかを確認する |
 | `src/app/login/page.tsx` | ログイン画面（`/login`） |
 | `src/app/api/login/route.ts` / `src/app/api/logout/route.ts` | ログイン・ログアウトの処理 |
-| `src/components/PriceGapApp.tsx` | 画面本体（入力フォーム・計算条件・結果一覧。スマホではカード表示） |
-| `src/components/ClientOnlyApp.tsx` | 画面をブラウザだけで表示するための入れ物 |
-| `src/app/page.tsx` | トップページ（`/`） |
 | `src/app/layout.tsx` | 全ページ共通の枠（タイトルなど） |
 
 ## 利益の計算式
 
 ```
-eBay 売上   = 販売価格 + 購入者負担の送料                     [USD]
+eBay 売上   = eBay 売価（購入者負担の送料は 0 として計算）     [USD]
 eBay 手数料 = eBay 売上 × (落札手数料率 + 海外取引手数料率) + 1注文あたり固定手数料  [USD]
 入金額      = (eBay 売上 − eBay 手数料) × 為替レート           [円]
-仕入れ合計  = スニダン価格 + スニダン手数料・国内送料 + 国際送料  [円]
+仕入れ合計  = 国内最安値 + 国内送料 + 国際送料                  [円]
 利益        = 入金額 − 仕入れ合計                               [円]
 利益率      = 利益 ÷ (eBay 売上 × 為替レート)
 ```
 
-手数料率・送料の初期値は目安です。最新の eBay 手数料や実際の送料に合わせて画面上で変更してください。
+手数料率・送料の初期値は目安です。画面の「計算条件」で、最新の eBay 手数料や実際の送料に合わせて変更してください（国際送料は検索条件ごとにも設定できます）。

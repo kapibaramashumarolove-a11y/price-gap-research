@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "価格差リサーチ",
-  description: "スニダン仕入れ × eBay販売の利益計算ツール",
+  description: "楽天・Yahoo!ショッピング仕入れ × eBay販売の利益リサーチツール",
   // スマホの「ホーム画面に追加」で表示される名前
   appleWebApp: { title: "価格差リサーチ" },
 };

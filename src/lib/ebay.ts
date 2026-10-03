@@ -1,8 +1,6 @@
 // eBay 公式 Browse API から「出品中の価格」を取得するためのロジック（サーバー側専用）。
 // キー（EBAY_CLIENT_SECRET など）を扱うので、ブラウザ側のコンポーネントからは import しないこと。
-// 画面からは /api/ebay/search を経由して呼び出す。
-
-import { DEFAULT_CONDITION_IDS } from "./ebayConditions";
+// 画面からは /api/research を経由して呼び出す。
 
 export type EbayEnvironment = "sandbox" | "production";
 
@@ -29,16 +27,6 @@ export type PriceSummary = {
   median: number | null;
   /** 最安値 [USD] */
   min: number | null;
-};
-
-export type ActiveListingPrices = PriceSummary & {
-  query: string;
-  environment: EbayEnvironment;
-  /** 絞り込みに使ったコンディション ID（空配列なら絞り込みなし） */
-  conditionIds: string[];
-  /** eBay 上でヒットした総件数（集計に使った件数より多いことがある） */
-  total: number;
-  fetchedAt: string;
 };
 
 /** 画面にそのまま表示してよい（キーの値を含まない）エラー */
@@ -170,11 +158,6 @@ export async function getAppAccessToken(
 
 // ---- 出品中の価格の検索 ----
 
-export type SearchOptions = {
-  /** 絞り込むコンディション ID（ebayConditions.ts 参照）。省略時は新品のみ、空配列なら絞り込みなし */
-  conditionIds?: readonly string[];
-};
-
 /** Browse API の filter パラメータを組み立てる */
 export function buildSearchFilter(conditionIds: readonly string[]): string {
   const filters = ["buyingOptions:{FIXED_PRICE}", `priceCurrency:${CURRENCY}`];
@@ -231,30 +214,4 @@ export async function searchEbayListings(
   const data = (await res.json()) as { total?: number; itemSummaries?: EbayItemSummary[] };
   const items = data.itemSummaries ?? [];
   return { total: data.total ?? items.length, items };
-}
-
-/**
- * キーワードで出品中（即決＝FIXED_PRICE）の商品を検索し、価格の中央値・最安値・件数を返す。
- * オークションは「現在の入札額」で実際の売値とかけ離れやすいため除外している。
- * 商品の状態は既定で新品のみ（中古が混ざると中央値が大きく下がるため）。
- */
-export async function searchActiveListingPrices(
-  query: string,
-  options: SearchOptions = {},
-  config: EbayConfig = readEbayConfig(),
-  fetchFn: typeof fetch = fetch,
-): Promise<ActiveListingPrices> {
-  const conditionIds = [...(options.conditionIds ?? DEFAULT_CONDITION_IDS)];
-  const q = query.trim();
-  if (q === "") throw new EbayApiError("検索キーワードを入力してください。", 400);
-
-  const { total, items } = await searchEbayListings({ q, conditionIds }, config, fetchFn);
-  return {
-    query: q,
-    environment: config.environment,
-    conditionIds,
-    total,
-    ...summarizePrices(extractUsdPrices(items)),
-    fetchedAt: new Date().toISOString(),
-  };
 }

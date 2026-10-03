@@ -6,7 +6,7 @@ import {
   extractUsdPrices,
   getAppAccessToken,
   readEbayConfig,
-  searchActiveListingPrices,
+  searchEbayListings,
   summarizePrices,
   type EbayConfig,
 } from "./ebay";
@@ -101,8 +101,8 @@ describe("getAppAccessToken", () => {
   });
 });
 
-describe("searchActiveListingPrices", () => {
-  it("トークン取得 → 検索 → 集計の流れ", async () => {
+describe("searchEbayListings", () => {
+  it("トークン取得 → キーワードで検索", async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     const fetchFn = vi.fn(async (url: string | URL, init?: RequestInit) => {
       calls.push({ url: String(url), init });
@@ -114,26 +114,17 @@ describe("searchActiveListingPrices", () => {
         itemSummaries: [
           { price: { value: "120.00", currency: "USD" } },
           { price: { value: "100.00", currency: "USD" } },
-          { price: { value: "150.00", currency: "USD" } },
         ],
       });
     });
 
-    const result = await searchActiveListingPrices(
-      " Nike Dunk ",
-      {},
+    const result = await searchEbayListings(
+      { q: " Nike Dunk ", conditionIds: ["1000"] },
       config,
       fetchFn as unknown as typeof fetch,
     );
-    expect(result).toMatchObject({
-      query: "Nike Dunk",
-      environment: "sandbox",
-      conditionIds: ["1000"],
-      total: 57,
-      count: 3,
-      median: 120,
-      min: 100,
-    });
+    expect(result.total).toBe(57);
+    expect(result.items).toHaveLength(2);
 
     expect(calls[0].url).toBe("https://api.sandbox.ebay.com/identity/v1/oauth2/token");
     const searchUrl = new URL(calls[1].url);
@@ -141,6 +132,7 @@ describe("searchActiveListingPrices", () => {
       "https://api.sandbox.ebay.com/buy/browse/v1/item_summary/search",
     );
     expect(searchUrl.searchParams.get("q")).toBe("Nike Dunk");
+    expect(searchUrl.searchParams.get("gtin")).toBeNull();
     expect(searchUrl.searchParams.get("filter")).toBe(
       "buyingOptions:{FIXED_PRICE},priceCurrency:USD,conditionIds:{1000}",
     );
@@ -150,8 +142,20 @@ describe("searchActiveListingPrices", () => {
     });
   });
 
-  it("空のキーワードはエラー", async () => {
-    await expect(searchActiveListingPrices("  ", {}, config, vi.fn())).rejects.toThrow(/キーワード/);
+  it("JAN（GTIN）だけでも検索できる", async () => {
+    const fetchFn = vi.fn(async (url: string | URL) =>
+      String(url).includes("/oauth2/token")
+        ? jsonResponse({ access_token: "tok", expires_in: 7200 })
+        : jsonResponse({ total: 0, itemSummaries: [] }),
+    );
+    await searchEbayListings({ gtin: "4521329362342", conditionIds: [] }, config, fetchFn as unknown as typeof fetch);
+    const searchUrl = new URL(String(fetchFn.mock.calls[1][0]));
+    expect(searchUrl.searchParams.get("gtin")).toBe("4521329362342");
+    expect(searchUrl.searchParams.get("q")).toBeNull();
+  });
+
+  it("キーワードも JAN もなければエラー", async () => {
+    await expect(searchEbayListings({ q: "  ", conditionIds: [] }, config, vi.fn())).rejects.toThrow(/キーワード/);
   });
 });
 

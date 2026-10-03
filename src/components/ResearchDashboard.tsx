@@ -40,7 +40,6 @@ import {
   type ResearchResponse,
 } from "@/lib/researchTypes";
 import { parseResearchRequest } from "@/lib/researchRequest";
-import AppNav from "./AppNav";
 import { INPUT_CLASS, NumberField, TextField } from "./Fields";
 
 const PRESETS_KEY = "price-gap:research-presets";
@@ -67,6 +66,14 @@ type PresetResult = { presetName: string; response: ResearchResponse };
 const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 });
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const dateTime = new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+const SETTING_FIELDS: { key: keyof Settings; label: string }[] = [
+  { key: "usdJpy", label: "為替（円/USD）" },
+  { key: "ebayFeeRate", label: "eBay 落札手数料（%）" },
+  { key: "internationalFeeRate", label: "海外取引手数料（%）" },
+  { key: "perOrderFeeUsd", label: "1注文の固定手数料（USD）" },
+  { key: "internationalShippingJpy", label: "国際送料の初期値（円）" },
+];
 
 const BASIS_SHORT: Record<PriceBasis, string> = { p25: "安い方25%", median: "中央値", min: "最安値" };
 const SOURCE_LABEL: Record<DomesticOffer["source"], string> = { rakuten: "楽天", yahoo: "Yahoo!" };
@@ -140,7 +147,11 @@ function fromForm(id: string, f: PresetForm): ResearchPreset | string {
 type Row = { candidate: Candidate; presetName: string; genre?: string; evaluation: Evaluation };
 
 export default function ResearchDashboard() {
-  const [settings] = useState<Settings>(() => ({ ...DEFAULT_SETTINGS, ...loadJson<Partial<Settings>>(SETTINGS_KEY) }));
+  const [settings, setSettings] = useState<Settings>(() => ({ ...DEFAULT_SETTINGS, ...loadJson<Partial<Settings>>(SETTINGS_KEY) }));
+  // 計算条件の入力中の文字列（入力途中の空欄なども表示できるように文字列で持つ）
+  const [settingInputs, setSettingInputs] = useState<Record<keyof Settings, string>>(
+    () => Object.fromEntries(Object.entries(settings).map(([k, v]) => [k, String(v)])) as Record<keyof Settings, string>,
+  );
   const [presets, setPresets] = useState<ResearchPreset[]>(() => loadJson<ResearchPreset[]>(PRESETS_KEY) ?? DEFAULT_PRESETS);
   const [criteria, setCriteria] = useState<TreasureCriteria>(() => ({
     ...DEFAULT_CRITERIA,
@@ -173,6 +184,7 @@ export default function ResearchDashboard() {
 
   useEffect(() => saveJson(PRESETS_KEY, presets), [presets]);
   useEffect(() => saveJson(CRITERIA_KEY, criteria), [criteria]);
+  useEffect(() => saveJson(SETTINGS_KEY, settings), [settings]);
   useEffect(() => saveJson(RESULTS_KEY, results), [results]);
   useEffect(() => saveJson(ONLY_TREASURES_KEY, onlyTreasures), [onlyTreasures]);
   useEffect(() => saveJson(GENRE_FILTER_KEY, genreFilter), [genreFilter]);
@@ -273,6 +285,12 @@ export default function ResearchDashboard() {
     await runPresets(targets);
   }
 
+  function handleSettingChange(key: keyof Settings, value: string) {
+    setSettingInputs((prev) => ({ ...prev, [key]: value }));
+    const n = toNonNegativeNumber(value);
+    if (n !== null) setSettings((prev) => ({ ...prev, [key]: n }));
+  }
+
   function handleCriteriaChange(key: keyof TreasureCriteria, value: string) {
     setCriteriaInputs((prev) => ({ ...prev, [key]: value }));
     if (key === "basis") {
@@ -330,9 +348,15 @@ export default function ResearchDashboard() {
 
   return (
     <main className="mx-auto w-full max-w-5xl space-y-6 px-4 pt-2 pb-[calc(2rem+env(safe-area-inset-bottom))] sm:pt-4">
-      <AppNav current="/research" />
       <header className="space-y-1">
-        <h1 className="text-xl font-bold sm:text-2xl">国内仕入れ × eBay 自動リサーチ</h1>
+        <div className="flex items-start justify-between gap-3">
+          <h1 className="text-xl font-bold sm:text-2xl">国内仕入れ × eBay 自動リサーチ</h1>
+          <form method="post" action="/api/logout" className="shrink-0">
+            <button type="submit" className="min-h-11 px-2 text-sm underline opacity-70 active:opacity-100">
+              ログアウト
+            </button>
+          </form>
+        </div>
         <p className="text-sm opacity-80">
           楽天・Yahoo!ショッピングの商品を JAN コードやカード番号で識別し、eBay の出品中価格と比べて利益を計算します。
         </p>
@@ -374,10 +398,29 @@ export default function ResearchDashboard() {
               </select>
             </label>
           </div>
+        </div>
+      </details>
+
+      {/* 計算条件（為替・手数料・国際送料） */}
+      <details className="group rounded-lg border border-black/10 dark:border-white/15">
+        <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-2 px-4 py-2 [&::-webkit-details-marker]:hidden">
+          <span className="font-semibold">計算条件</span>
+          <span className="flex items-center gap-2 text-sm opacity-70">
+            為替 {settings.usdJpy} 円/USD
+            <span aria-hidden className="transition-transform group-open:rotate-180">
+              ▼
+            </span>
+          </span>
+        </summary>
+        <div className="space-y-3 border-t border-black/10 p-4 dark:border-white/15">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+            {SETTING_FIELDS.map(({ key, label }) => (
+              <NumberField key={key} label={label} value={settingInputs[key]} onChange={(v) => handleSettingChange(key, v)} />
+            ))}
+          </div>
           <p className="text-xs opacity-60">
-            為替 {settings.usdJpy} 円/USD・eBay 手数料 {settings.ebayFeeRate + settings.internationalFeeRate}% ＋ ${settings.perOrderFeeUsd}
-            ・国際送料は検索条件ごとの値（未設定なら {yen.format(settings.internationalShippingJpy)}）で計算します。
-            為替・手数料は「手入力で計算」の計算条件で変更できます。
+            利益 =（eBay 売価 − eBay 手数料）× 為替 −（国内の仕入れ値 + 国内送料）− 国際送料。
+            国際送料は検索条件ごとに設定でき、未設定の条件にはここの値を使います。手数料率は目安なので、最新の eBay 手数料に合わせて変更してください。
           </p>
         </div>
       </details>

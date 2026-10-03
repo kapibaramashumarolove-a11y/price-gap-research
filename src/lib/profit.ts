@@ -1,5 +1,5 @@
-// スニダンで仕入れて eBay で販売した場合の利益を計算するロジック。
-// 画面(UI)から切り離しておくことで、テストしやすく、後で eBay API の値を流し込むのも簡単になる。
+// 国内（楽天・Yahoo!ショッピング）で仕入れて eBay で販売した場合の利益を計算するロジック。
+// 画面(UI)から切り離して、テストしやすくしている。
 
 /** アプリ全体で共通の計算条件（設定画面で変更できる値） */
 export type Settings = {
@@ -15,16 +15,12 @@ export type Settings = {
   internationalShippingJpy: number;
 };
 
-/** 仕入れ候補 1 件分の入力値 */
-export type Item = {
-  id: string;
-  name: string;
-  sku: string;
-  size: string;
-  /** スニダンでの購入価格 [円] */
-  snkrdunkPriceJpy: number;
-  /** スニダン側の手数料・国内送料など [円] */
-  snkrdunkExtraJpy: number;
+/** 利益計算の入力値（1 商品分） */
+export type ProfitInput = {
+  /** 国内での仕入れ価格 [円] */
+  purchasePriceJpy: number;
+  /** 国内送料など、仕入れにかかるその他の費用 [円] */
+  purchaseExtraJpy: number;
   /** eBay での想定販売価格 [USD] */
   ebayPriceUsd: number;
   /** 購入者から受け取る送料 [USD] */
@@ -54,14 +50,14 @@ export const DEFAULT_SETTINGS: Settings = {
   internationalShippingJpy: 4000,
 };
 
-export function calculateProfit(item: Item, settings: Settings): ProfitResult {
+export function calculateProfit(item: ProfitInput, settings: Settings): ProfitResult {
   const revenueUsd = item.ebayPriceUsd + item.ebayShippingChargedUsd;
   const feeRate = (settings.ebayFeeRate + settings.internationalFeeRate) / 100;
   const ebayFeesUsd = revenueUsd * feeRate + settings.perOrderFeeUsd;
 
   const payoutJpy = (revenueUsd - ebayFeesUsd) * settings.usdJpy;
   const totalCostJpy =
-    item.snkrdunkPriceJpy + item.snkrdunkExtraJpy + settings.internationalShippingJpy;
+    item.purchasePriceJpy + item.purchaseExtraJpy + settings.internationalShippingJpy;
   const profitJpy = payoutJpy - totalCostJpy;
 
   const revenueJpy = revenueUsd * settings.usdJpy;

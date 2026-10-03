@@ -1,5 +1,5 @@
 // 自動リサーチの結果から利益を計算し、「お宝商品」の条件に合うかを判定する（画面側で使う）。
-// 計算式は手入力の画面と同じ calculateProfit を使う:
+// 計算式は calculateProfit（src/lib/profit.ts）:
 //   利益 = (eBay 売価 − eBay 手数料) × 為替 − (国内仕入れ値 + 国内送料) − 国際送料
 
 import { calculateProfit, type ProfitResult, type Settings } from "./profit";
@@ -74,12 +74,8 @@ export function evaluateCandidate(
 
   const profit = calculateProfit(
     {
-      id: candidate.key,
-      name: offer.title,
-      sku: candidate.label,
-      size: "",
-      snkrdunkPriceJpy: offer.priceJpy,
-      snkrdunkExtraJpy: domesticShippingJpy,
+      purchasePriceJpy: offer.priceJpy,
+      purchaseExtraJpy: domesticShippingJpy,
       ebayPriceUsd,
       ebayShippingChargedUsd: 0,
     },

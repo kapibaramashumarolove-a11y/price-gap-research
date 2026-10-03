@@ -1,13 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { calculateProfit, DEFAULT_SETTINGS, type Item } from "./profit";
+import { calculateProfit, DEFAULT_SETTINGS, type ProfitInput } from "./profit";
 
-const baseItem: Item = {
-  id: "1",
-  name: "Nike Dunk Low Retro",
-  sku: "DD1391-100",
-  size: "27.0cm",
-  snkrdunkPriceJpy: 20000,
-  snkrdunkExtraJpy: 1000,
+const baseItem: ProfitInput = {
+  purchasePriceJpy: 20000,
+  purchaseExtraJpy: 1000,
   ebayPriceUsd: 200,
   ebayShippingChargedUsd: 20,
 };
@@ -27,7 +23,7 @@ describe("calculateProfit", () => {
   });
 
   it("仕入れが高すぎると利益がマイナスになる", () => {
-    const r = calculateProfit({ ...baseItem, snkrdunkPriceJpy: 40000 }, DEFAULT_SETTINGS);
+    const r = calculateProfit({ ...baseItem, purchasePriceJpy: 40000 }, DEFAULT_SETTINGS);
     expect(r.profitJpy).toBeLessThan(0);
   });
 

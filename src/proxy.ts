@@ -1,5 +1,5 @@
 // すべてのページと API の前に動き、合言葉でログインしていない人を止める。
-// 念のため、eBay を呼ぶ API（/api/ebay/search）の中でも同じ確認をしている。
+// 念のため、楽天・Yahoo!・eBay を呼ぶ API（/api/research など）の中でも同じ確認をしている。
 
 import { NextResponse, type NextRequest } from "next/server";
 import { AUTH_COOKIE, getAuthMode, isAuthenticated } from "@/lib/auth";
