@@ -32,7 +32,7 @@ describe("searchRakuten", () => {
 
     const [input, init] = fetchFn.mock.calls[0];
     const url = new URL(String(input));
-    expect(url.origin + url.pathname).toBe("https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20220601");
+    expect(url.origin + url.pathname).toBe("https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701");
     expect(url.searchParams.get("applicationId")).toBe("app");
     expect(url.searchParams.get("accessKey")).toBeNull();
     expect(url.searchParams.get("keyword")).toBe("テラスタルフェス BOX");
@@ -87,6 +87,7 @@ describe("searchRakuten", () => {
     const fail = (status: number, errorMessage: string) =>
       searchRakuten({ ...params, siteOrigin: "https://example.vercel.app" }, env, vi.fn<typeof fetch>(async () => jsonResponse({ errors: { errorCode: status, errorMessage } }, status)));
     await expect(fail(403, "Invalid Access Key")).rejects.toThrow(/同じアプリのアクセスキー/);
+    await expect(fail(400, "API Configuration not found")).rejects.toThrow(/バージョンが使えなくなっています/);
     await expect(fail(400, "specify valid applicationId")).rejects.toThrow(/新しい楽天ウェブサービスで登録したアプリ/);
     await expect(fail(403, "REQUEST_CONTEXT_BODY_HTTP_REFERRER_MISSING")).rejects.toThrow(/許可されたWebサイト」に https:\/\/example\.vercel\.app/);
   });

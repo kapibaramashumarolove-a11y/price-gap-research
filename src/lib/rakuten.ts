@@ -9,7 +9,9 @@
 import { normalizeText } from "./identify";
 import type { ItemCondition, ResearchKind, DomesticOffer } from "./researchTypes";
 
-export const RAKUTEN_URL = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20220601";
+// 2022-06-01 版は 2026 年 8 月に停止し、「API Configuration not found」（HTTP 400）を返すようになった。
+// 入出力（formatVersion=2）の項目名は変わっていない
+export const RAKUTEN_URL = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701";
 /** 1 回で取れる最大件数 */
 export const RAKUTEN_HITS = 30;
 
@@ -69,6 +71,9 @@ export function rakutenErrorMessage(status: number, detail: string, origin: stri
   }
   if (/applicationId/i.test(detail)) {
     return `楽天: アプリ ID が正しくありません（${detail}）。2026 年の新しい楽天ウェブサービスで登録したアプリのアプリケーション ID を RAKUTEN_APP_ID に設定してください。${sent}`;
+  }
+  if (/API Configuration not found/i.test(detail)) {
+    return `楽天: 楽天 API のバージョンが使えなくなっています（${detail}）。アプリの更新が必要です（src/lib/rakuten.ts の RAKUTEN_URL）。${sent}`;
   }
   if (/refer|origin|domain|site/i.test(detail) || status === 403) {
     return `楽天: アクセスが拒否されました（${detail}）。楽天のアプリ設定の「許可されたWebサイト」に ${origin ?? "このサイトの URL"} を登録しているか確認してください。${sent}`;
