@@ -16,6 +16,8 @@ import {
   type CsvMode,
 } from "@/lib/presetCsv";
 import { DEFAULT_SETTINGS, type Settings } from "@/lib/profit";
+import { parseQuickInput, type QuickLine } from "@/lib/quickInput";
+import { fetchRakuten, type RakutenCredentials, type RakutenResult } from "@/lib/rakuten";
 import {
   DEFAULT_CRITERIA,
   evaluateCandidate,
@@ -158,6 +160,16 @@ export default function ResearchDashboard() {
   const [csvText, setCsvText] = useState("");
   const [csvImport, setCsvImport] = useState<CsvImportResult | null>(null);
   const stopRequested = useRef(false);
+  const rakutenCredentials = useRef<Promise<RakutenCredentials | null> | null>(null);
+  const [quickText, setQuickText] = useState("");
+  const [quickCondition, setQuickCondition] = useState<ItemCondition>("new");
+  const [quickGenre, setQuickGenre] = useState("");
+  const [quickSave, setQuickSave] = useState(true);
+  const quickLines = useMemo(
+    () => parseQuickInput(quickText, { condition: quickCondition, genre: quickGenre }, () => crypto.randomUUID()),
+    [quickText, quickCondition, quickGenre],
+  );
+  const quickPresets = quickLines.flatMap((l) => (l.preset ? [l.preset] : []));
 
   useEffect(() => saveJson(PRESETS_KEY, presets), [presets]);
   useEffect(() => saveJson(CRITERIA_KEY, criteria), [criteria]);
@@ -201,13 +213,26 @@ export default function ResearchDashboard() {
   const treasures = rows.filter((r) => r.evaluation.isTreasure);
   const visibleRows = onlyTreasures ? treasures : rows;
 
+  /** 楽天のキー（ログイン済みのときだけサーバーから受け取る。未設定なら null）。1 回だけ取りに行く */
+  function loadRakutenCredentials(): Promise<RakutenCredentials | null> {
+    rakutenCredentials.current ??= fetch("/api/rakuten/credentials", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body) => (body?.configured ? { appId: body.appId, accessKey: body.accessKey, affiliateId: body.affiliateId } : null))
+      .catch(() => null);
+    return rakutenCredentials.current;
+  }
+
   async function runPreset(preset: ResearchPreset): Promise<void> {
     setErrors((prev) => ({ ...prev, [preset.id]: "" }));
     try {
+      // 楽天はブラウザから直接検索する（楽天が「許可されたWebサイト」をブラウザの送る URL で確認するため）。
+      // 結果（またはエラー）をサーバーに渡し、サーバーは Yahoo! と eBay を調べる
+      const creds = await loadRakutenCredentials();
+      const rakuten: RakutenResult | undefined = creds ? await fetchRakuten(preset, creds, window.location.origin) : undefined;
       const res = await fetch("/api/research", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(preset),
+        body: JSON.stringify({ ...preset, rakuten }),
       });
       if (res.status === 401) {
         window.location.reload();
@@ -233,6 +258,19 @@ export default function ResearchDashboard() {
       await runPreset(preset);
     }
     setRunning(null);
+  }
+
+  /** 直接入力した商品を調べる（保存するなら検索条件に追加・上書きしてから） */
+  async function handleQuickRun() {
+    if (quickPresets.length === 0) return;
+    let targets = quickPresets;
+    if (quickSave) {
+      const next = applyImportedPresets(presets, quickPresets, "merge");
+      setPresets(next);
+      // 同じ名前の条件があれば、その ID で実行する（結果が同じ条件にまとまるように）
+      targets = quickPresets.map((q) => next.find((p) => p.name === q.name) ?? q);
+    }
+    await runPresets(targets);
   }
 
   function handleCriteriaChange(key: keyof TreasureCriteria, value: string) {
@@ -343,6 +381,20 @@ export default function ResearchDashboard() {
           </p>
         </div>
       </details>
+
+      <QuickInput
+        text={quickText}
+        onTextChange={setQuickText}
+        condition={quickCondition}
+        onConditionChange={setQuickCondition}
+        genre={quickGenre}
+        onGenreChange={setQuickGenre}
+        save={quickSave}
+        onSaveChange={setQuickSave}
+        lines={quickLines}
+        onRun={handleQuickRun}
+        busy={busy}
+      />
 
       {/* 検索条件（プリセット） */}
       <section className="space-y-3">
@@ -655,6 +707,97 @@ function PresetEditor({
         </button>
       </div>
     </form>
+  );
+}
+
+function QuickInput({
+  text,
+  onTextChange,
+  condition,
+  onConditionChange,
+  genre,
+  onGenreChange,
+  save,
+  onSaveChange,
+  lines,
+  onRun,
+  busy,
+}: {
+  text: string;
+  onTextChange: (text: string) => void;
+  condition: ItemCondition;
+  onConditionChange: (condition: ItemCondition) => void;
+  genre: string;
+  onGenreChange: (genre: string) => void;
+  save: boolean;
+  onSaveChange: (save: boolean) => void;
+  lines: QuickLine[];
+  onRun: () => void;
+  busy: boolean;
+}) {
+  const valid = lines.filter((l) => l.preset).length;
+  return (
+    <section className="space-y-3 rounded-lg border border-black/20 p-4 dark:border-white/25">
+      <h2 className="font-semibold">型番・商品名で調べる</h2>
+      <label className="flex flex-col gap-1 text-sm">
+        <span>1 行に 1 商品（型番・商品名・JAN）</span>
+        <textarea
+          value={text}
+          onChange={(e) => onTextChange(e.target.value)}
+          rows={4}
+          placeholder={"BOSS DS-1\nキヤノン AE-1\nニコン F3 ボディ | Nikon F3 body\n4521329362342"}
+          className="w-full rounded-lg border border-black/20 bg-transparent p-3 text-base dark:border-white/25"
+        />
+      </label>
+      <p className="text-xs opacity-60">
+        eBay は英語で検索します。型番が入っていればそのまま使います。日本語の商品名だけのときは「ニコン F3 ボディ | Nikon F3 body」のように、| の後に英語を書いてください。
+      </p>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="flex min-w-0 flex-col gap-1 text-sm">
+          <span>状態</span>
+          <select value={condition} onChange={(e) => onConditionChange(e.target.value as ItemCondition)} className={INPUT_CLASS}>
+            {ITEM_CONDITIONS.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <TextField label="ジャンル（任意）" value={genre} onChange={onGenreChange} />
+      </div>
+
+      {lines.length > 0 && (
+        <ul className="space-y-1 text-xs" aria-label="入力の確認">
+          {lines.map((l) => (
+            <li key={l.line} className={l.error ? "text-red-600" : "opacity-80"}>
+              {l.preset ? (
+                <>
+                  ✓ {l.line}行目 国内「{l.preset.keyword || `JAN ${l.preset.jan}`}」→ eBay「{l.preset.ebayKeyword ?? `JAN ${l.preset.jan}`}」
+                  {l.preset.ebayKeyword && !l.text.includes("|") && l.preset.ebayKeyword !== l.preset.keyword && "（自動）"}
+                </>
+              ) : (
+                <>
+                  ✗ {l.line}行目「{l.text}」: {l.error}
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <label className="flex min-h-11 items-center gap-2 text-sm">
+        <input type="checkbox" checked={save} onChange={(e) => onSaveChange(e.target.checked)} className="h-5 w-5" />
+        検索条件として保存する（次から「実行」だけで調べ直せます）
+      </label>
+      <button
+        type="button"
+        onClick={onRun}
+        disabled={busy || valid === 0}
+        className="min-h-12 w-full rounded-lg bg-foreground px-6 text-base font-medium text-background active:opacity-80 disabled:opacity-50 sm:w-auto"
+      >
+        {valid > 0 ? `調べる（${valid}件）` : "調べる"}
+      </button>
+    </section>
   );
 }
 

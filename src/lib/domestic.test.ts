@@ -133,3 +133,24 @@ describe("searchYahoo", () => {
     expect(new URL(String(fetchFn.mock.calls[0][0])).searchParams.get("condition")).toBeNull();
   });
 });
+
+describe("parseClientRakuten（ブラウザで検索した楽天の結果の検査）", () => {
+  it("正しい商品だけを残し、エラーはそのまま渡す", async () => {
+    const { parseClientRakuten } = await import("./rakuten");
+    expect(parseClientRakuten(undefined)).toBeUndefined();
+    expect(parseClientRakuten({ error: "楽天: アクセスが拒否されました" })).toEqual({ error: "楽天: アクセスが拒否されました" });
+    const result = parseClientRakuten({
+      offers: [
+        { title: "BOSS DS-1", priceJpy: 4500, shipping: "free", url: "https://item.rakuten.co.jp/a/", shopName: "A", searchText: "BOSS DS-1" },
+        { title: "危ない URL", priceJpy: 1, shipping: "free", url: "javascript:alert(1)" },
+        { title: "価格なし", shipping: "free", url: "https://item.rakuten.co.jp/b/" },
+        { title: "送料が不正", priceJpy: 1, shipping: "maybe", url: "https://item.rakuten.co.jp/c/" },
+      ],
+    });
+    expect(result).toEqual({
+      offers: [
+        { source: "rakuten", title: "BOSS DS-1", priceJpy: 4500, shipping: "free", url: "https://item.rakuten.co.jp/a/", shopName: "A", imageUrl: undefined, searchText: "BOSS DS-1" },
+      ],
+    });
+  });
+});

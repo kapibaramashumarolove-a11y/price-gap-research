@@ -69,7 +69,7 @@ async function cachedEbaySearch(params: ListingSearchParams, deps: ResearchDeps)
   return result;
 }
 
-const defaultDeps: ResearchDeps = {
+export const defaultResearchDeps: ResearchDeps = {
   searchRakuten: (p) => searchRakuten(p),
   searchYahoo: (p) => searchYahoo(p),
   searchEbay: (p) => searchEbayListings(p),
@@ -266,7 +266,7 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
 
 export async function runResearch(
   request: ResearchRequest,
-  deps: ResearchDeps = defaultDeps,
+  deps: ResearchDeps = defaultResearchDeps,
   /** このサイト自身の URL。楽天 API に送る Referer / Origin に使う */
   siteOrigin?: string,
 ): Promise<ResearchResponse> {

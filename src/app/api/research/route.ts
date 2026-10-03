@@ -3,7 +3,9 @@
 
 import type { NextRequest } from "next/server";
 import { AUTH_COOKIE, isAuthenticated } from "@/lib/auth";
-import { runResearch } from "@/lib/research";
+import { DomesticApiError } from "@/lib/domestic";
+import { parseClientRakuten } from "@/lib/rakuten";
+import { defaultResearchDeps, runResearch } from "@/lib/research";
 import { parseResearchRequest } from "@/lib/researchRequest";
 
 // 楽天・Yahoo! と eBay（最大 30 商品）を順に呼ぶので、時間に余裕を持たせる
@@ -15,12 +17,25 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "ログインが必要です。" }, { status: 401 });
   }
 
-  const parsed = parseResearchRequest(await request.json().catch(() => null));
+  const body = await request.json().catch(() => null);
+  const parsed = parseResearchRequest(body);
   if (typeof parsed === "string") return Response.json({ error: parsed }, { status: 400 });
 
+  // 楽天はブラウザで検索した結果が送られてくる（src/lib/rakuten.ts の説明を参照）。
+  // 送られてこなければ、サーバーから楽天を呼ぶ
+  const clientRakuten = parseClientRakuten((body as { rakuten?: unknown }).rakuten);
+  const deps = clientRakuten
+    ? {
+        ...defaultResearchDeps,
+        searchRakuten: async () => {
+          if ("error" in clientRakuten) throw new DomesticApiError(clientRakuten.error);
+          return clientRakuten.offers;
+        },
+      }
+    : defaultResearchDeps;
+
   try {
-    // 楽天 API は Referer / Origin を「許可されたWebサイト」と照合するので、このサイトの URL を渡す
-    return Response.json(await runResearch(parsed, undefined, request.nextUrl.origin));
+    return Response.json(await runResearch(parsed, deps, request.nextUrl.origin));
   } catch (err) {
     console.error("research failed:", err);
     return Response.json({ error: "リサーチ中にエラーが発生しました。サーバーのログを確認してください。" }, { status: 500 });
