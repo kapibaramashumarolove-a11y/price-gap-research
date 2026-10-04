@@ -93,6 +93,26 @@ export type EbayMarket = {
   /** eBay のサイトで同じ条件の出品中・落札済みを見るリンク */
   activeUrl: string;
   soldUrl: string;
+  /** 売れ行きの推定（調べなかったときは undefined） */
+  sales?: SalesSignal;
+};
+
+/**
+ * eBay の売れ行きの推定。
+ * eBay の落札データの API は承認制で使えないため、出品中の出品のうち「複数個まとめて出品していて、
+ * 売れた数が分かるもの」から推定する。中古の 1 点ものは売れた数が分からない（multiQuantityListings が 0）。
+ */
+export type SalesSignal = {
+  /** 販売数を調べた出品数 */
+  checkedListings: number;
+  /** そのうち複数個まとめて出品していて、売れた数が分かる出品数 */
+  multiQuantityListings: number;
+  /** 売れた数の合計（各出品の出品開始からの合計） */
+  soldTotal: number;
+  /** 1 か月（30 日）あたりの推定販売数（各出品の「売れた数 ÷ 出品日数 × 30」の合計） */
+  estimatedMonthlySales: number;
+  /** 売れた実績のある出品の価格（売れた数で重み付けした中央値）。実売価格に最も近い目安 [USD] */
+  soldPriceMedianUsd: number | null;
 };
 
 /** 同じ商品とみなした国内の商品のまとまり＋eBay 相場 */

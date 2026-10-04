@@ -7,8 +7,10 @@ import { DomesticApiError, searchRakuten, searchYahoo, type RawDomesticOffer } f
 import {
   EbayApiError,
   extractUsdPrices,
+  getItemSales,
   searchEbayListings,
   summarizePrices,
+  type ItemSales,
   type EbayItemSummary,
   type ListingSearchParams,
   type ListingSearchResult,
@@ -35,6 +37,7 @@ import {
   type EbayMarket,
   type ResearchRequest,
   type ResearchResponse,
+  type SalesSignal,
 } from "./researchTypes";
 
 /** 1 つの商品について画面に返す国内の出品数（楽天・Yahoo! それぞれ） */
@@ -50,6 +53,8 @@ export type ResearchDeps = {
   searchRakuten: typeof searchRakuten;
   searchYahoo: typeof searchYahoo;
   searchEbay: (params: ListingSearchParams) => Promise<ListingSearchResult>;
+  /** 出品 1 件の販売数（売れ行きの推定に使う）。なければ売れ行きは調べない */
+  getItemSales?: (itemId: string) => Promise<ItemSales>;
   now: () => number;
 };
 
@@ -58,6 +63,7 @@ const ebayCache = new Map<string, { at: number; result: ListingSearchResult }>()
 /** テスト用：eBay の結果の保存を消す */
 export function clearEbayCache() {
   ebayCache.clear();
+  itemSalesCache.clear();
 }
 
 async function cachedEbaySearch(params: ListingSearchParams, deps: ResearchDeps): Promise<ListingSearchResult> {
@@ -73,6 +79,7 @@ export const defaultResearchDeps: ResearchDeps = {
   searchRakuten: (p) => searchRakuten(p),
   searchYahoo: (p) => searchYahoo(p),
   searchEbay: (p) => searchEbayListings(p),
+  getItemSales: (id) => getItemSales(id),
   now: Date.now,
 };
 
@@ -160,7 +167,11 @@ async function lookUpEbay(
   fallback: EbaySearchPlan | undefined,
   deps: ResearchDeps,
 ): Promise<EbayMarket | string> {
-  const summarize = (plan: EbaySearchPlan, result: ListingSearchResult, usedKeywordFallback: boolean): EbayMarket => {
+  const summarize = (
+    plan: EbaySearchPlan,
+    result: ListingSearchResult,
+    usedKeywordFallback: boolean,
+  ): { market: EbayMarket; matched: EbayItemSummary[] } => {
     const matched = trimPriceOutliers(result.items.filter((item) => item.title && plan.titleFilter(item.title)));
     const prices = extractUsdPrices(matched);
     const { count, min, median } = summarizePrices(prices);
@@ -175,7 +186,7 @@ async function lookUpEbay(
       .filter((sample, i, all) => all.findIndex((x) => x.url === sample.url) === i)
       .sort((a, b) => a.priceUsd - b.priceUsd)
       .slice(0, SAMPLE_COUNT);
-    return {
+    const market: EbayMarket = {
       query: plan.q ?? "",
       gtin: plan.gtin,
       usedKeywordFallback,
@@ -189,20 +200,94 @@ async function lookUpEbay(
       activeUrl: ebayWebSearchUrl(plan.webQuery, false),
       soldUrl: ebayWebSearchUrl(plan.webQuery, true),
     };
+    return { market, matched };
   };
   const search = (plan: EbaySearchPlan) =>
     cachedEbaySearch({ q: plan.q, gtin: plan.gtin, conditionIds: plan.conditionIds }, deps);
 
   try {
-    const market = summarize(primary, await search(primary), false);
+    let found = summarize(primary, await search(primary), false);
     // JAN で見つからない（eBay のカタログに未登録など）ときは、英語のキーワードで探し直す
-    if (fallback && market.count < 3) return summarize(fallback, await search(fallback), true);
-    return market;
+    if (fallback && found.market.count < 3) found = summarize(fallback, await search(fallback), true);
+    const sales = await lookUpSales(found.matched, deps);
+    return sales ? { ...found.market, sales } : found.market;
   } catch (err) {
     if (err instanceof EbayApiError) return err.message;
     console.error("eBay lookup failed:", err);
     return "eBay への接続中にエラーが発生しました。";
   }
+}
+
+// ---- 売れ行きの推定 ----
+
+/** 販売数を調べる出品数（eBay のおすすめ順＝販売実績も加味された順の上位から） */
+const SALES_CHECK_COUNT = 8;
+/** 出品ごとの販売数を使い回す時間 */
+const ITEM_SALES_CACHE_MS = 6 * 60 * 60 * 1000;
+const itemSalesCache = new Map<string, { at: number; sales: ItemSales }>();
+/** 出品から間もないと 1 か月あたりの数が大きく出すぎるので、出品日数はこれ以上として計算する */
+const MIN_LISTING_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** 重み付きの中央値（値を小さい順に並べ、重みの合計が半分を超えたところの値） */
+function weightedMedian(entries: { value: number; weight: number }[]): number | null {
+  const sorted = entries.filter((e) => e.weight > 0).sort((a, b) => a.value - b.value);
+  const total = sorted.reduce((sum, e) => sum + e.weight, 0);
+  if (total === 0) return null;
+  let acc = 0;
+  for (const e of sorted) {
+    acc += e.weight;
+    if (acc >= total / 2) return Math.round(e.value * 100) / 100;
+  }
+  return null;
+}
+
+/** 出品ごとの販売数から、売れ行き（月あたりの推定販売数・売れている出品の価格）をまとめる */
+export function computeSalesSignal(
+  listings: { sales: ItemSales; priceUsd: number; originDate?: string }[],
+  now: number,
+): SalesSignal {
+  const multi = listings.filter((l) => l.sales.totalQuantity > 1);
+  const sold = multi.filter((l) => l.sales.soldQuantity > 0);
+  const estimatedMonthlySales = sold.reduce((sum, l) => {
+    const started = l.originDate ? Date.parse(l.originDate) : NaN;
+    const days = Number.isFinite(started) ? Math.max(MIN_LISTING_DAYS, (now - started) / DAY_MS) : 365;
+    return sum + (l.sales.soldQuantity / days) * 30;
+  }, 0);
+  return {
+    checkedListings: listings.length,
+    multiQuantityListings: multi.length,
+    soldTotal: sold.reduce((sum, l) => sum + l.sales.soldQuantity, 0),
+    estimatedMonthlySales: Math.round(estimatedMonthlySales * 10) / 10,
+    soldPriceMedianUsd: weightedMedian(sold.map((l) => ({ value: l.priceUsd, weight: l.sales.soldQuantity }))),
+  };
+}
+
+/** 集計に使った出品の上位の販売数を調べて、売れ行きを推定する（調べられなければ undefined） */
+async function lookUpSales(matched: EbayItemSummary[], deps: ResearchDeps): Promise<SalesSignal | undefined> {
+  const getSales = deps.getItemSales;
+  if (!getSales) return undefined;
+  const targets = matched
+    .filter((item, i, all) => item.itemId && all.findIndex((x) => x.itemId === item.itemId) === i)
+    .slice(0, SALES_CHECK_COUNT);
+  if (targets.length === 0) return undefined;
+  const results = await mapWithConcurrency(targets, EBAY_CONCURRENCY, async (item) => {
+    const id = item.itemId!;
+    const hit = itemSalesCache.get(id);
+    if (hit && deps.now() - hit.at < ITEM_SALES_CACHE_MS) return { item, sales: hit.sales };
+    try {
+      const sales = await getSales(id);
+      itemSalesCache.set(id, { at: deps.now(), sales });
+      return { item, sales };
+    } catch {
+      // 1 件取れなくても、ほかの出品で推定する
+      return undefined;
+    }
+  });
+  const listings = results.flatMap((r) =>
+    r ? [{ sales: r.sales, priceUsd: Number(r.item.price?.value), originDate: r.item.itemOriginDate ?? r.item.itemCreationDate }] : [],
+  );
+  return listings.length > 0 ? computeSalesSignal(listings, deps.now()) : undefined;
 }
 
 /** 識別で見つけた商品の eBay 検索（JAN 検索で見つからなければ ebayKeyword で探し直す） */

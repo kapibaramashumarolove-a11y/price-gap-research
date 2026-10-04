@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RawDomesticOffer } from "./domestic";
 import { DomesticApiError } from "./domestic";
 import type { EbayItemSummary } from "./ebay";
-import { clearEbayCache, groupOffers, percentile, runResearch, trimPriceOutliers, type ResearchDeps } from "./research";
+import { clearEbayCache, computeSalesSignal, groupOffers, percentile, runResearch, trimPriceOutliers, type ResearchDeps } from "./research";
 
 function offer(partial: Partial<RawDomesticOffer> & Pick<RawDomesticOffer, "title" | "priceJpy">): RawDomesticOffer {
   return {
@@ -223,5 +223,60 @@ describe("trimPriceOutliers", () => {
   it("中央値の 30% 未満・3 倍超の出品（部品・まとめ売り）を除く", () => {
     const items = [10, 500, 560, 600, 650, 2000].map((p) => ebayItem(`item ${p}`, p));
     expect(trimPriceOutliers(items).map((i) => Number(i.price?.value))).toEqual([500, 560, 600, 650]);
+  });
+});
+
+describe("売れ行きの推定", () => {
+  const now = Date.parse("2026-10-04T00:00:00Z");
+  const daysAgo = (d: number) => new Date(now - d * 86400000).toISOString();
+
+  it("まとめ出品の売れた数と出品日数から、月の販売数と売れている出品の価格を出す", () => {
+    const signal = computeSalesSignal(
+      [
+        { sales: { soldQuantity: 30, totalQuantity: 40 }, priceUsd: 500, originDate: daysAgo(90) }, // 月 10 個
+        { sales: { soldQuantity: 3, totalQuantity: 5 }, priceUsd: 600, originDate: daysAgo(30) }, // 月 3 個
+        { sales: { soldQuantity: 0, totalQuantity: 2 }, priceUsd: 450, originDate: daysAgo(10) },
+        { sales: { soldQuantity: 0, totalQuantity: 1 }, priceUsd: 400, originDate: daysAgo(5) }, // 1 点もの（数えない）
+      ],
+      now,
+    );
+    expect(signal).toEqual({
+      checkedListings: 4,
+      multiQuantityListings: 3,
+      soldTotal: 33,
+      estimatedMonthlySales: 13,
+      soldPriceMedianUsd: 500,
+    });
+  });
+
+  it("出品から間もない出品は 7 日として数え、多く出すぎないようにする", () => {
+    const signal = computeSalesSignal([{ sales: { soldQuantity: 1, totalQuantity: 3 }, priceUsd: 100, originDate: daysAgo(1) }], now);
+    expect(signal.estimatedMonthlySales).toBeCloseTo(4.3, 1);
+  });
+
+  it("リサーチの結果に売れ行きを付け、1 件取れなくても他の出品で推定する", async () => {
+    const getItemSales = vi.fn(async (id: string) => {
+      if (id === "bad") throw new Error("boom");
+      return { soldQuantity: 10, totalQuantity: 12 };
+    });
+    const res = await runResearch(
+      { kind: "item", keyword: "BOSS DS-1", ngWords: [], ebayKeyword: "Boss DS-1", condition: "new" },
+      {
+        searchRakuten: vi.fn(async () => []),
+        searchYahoo: vi.fn(async () => [offer({ title: "BOSS DS-1 新品", priceJpy: 6000 })]),
+        searchEbay: vi.fn(async () => ({
+          total: 3,
+          items: [
+            { ...ebayItem("Boss DS-1 Distortion", 60), itemId: "a", itemOriginDate: daysAgo(30) },
+            { ...ebayItem("Boss DS-1 Distortion pedal", 70), itemId: "bad", itemOriginDate: daysAgo(30) },
+            { ...ebayItem("Boss DS-1 new", 65), itemId: "c", itemOriginDate: daysAgo(60) },
+          ],
+        })),
+        getItemSales,
+        now: () => now,
+      },
+    );
+    expect(getItemSales).toHaveBeenCalledTimes(3);
+    expect(res.candidates[0].ebay?.sales).toMatchObject({ checkedListings: 2, multiQuantityListings: 2, soldTotal: 20, estimatedMonthlySales: 15 });
   });
 });

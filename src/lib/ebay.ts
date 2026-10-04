@@ -17,6 +17,9 @@ export type EbayItemSummary = {
   price?: { value?: string; currency?: string };
   buyingOptions?: string[];
   itemWebUrl?: string;
+  /** 出品が最初に始まった日時（再出品されても変わらない） */
+  itemOriginDate?: string;
+  itemCreationDate?: string;
 };
 
 /** 画面に返す価格のまとめ */
@@ -214,4 +217,39 @@ export async function searchEbayListings(
   const data = (await res.json()) as { total?: number; itemSummaries?: EbayItemSummary[] };
   const items = data.itemSummaries ?? [];
   return { total: data.total ?? items.length, items };
+}
+
+// ---- 1 件の出品の販売数 ----
+// 落札データの API（Marketplace Insights）は eBay の承認制で使えないため、
+// 出品の詳細（getItem）の「この出品で売れた数」を使って売れ行きを推定する。
+// 売れた数が分かるのは、同じ商品を複数個まとめて出品している場合（新品・ショップの在庫など）だけ。
+
+export type ItemSales = {
+  /** この出品で売れた数（出品開始からの合計） */
+  soldQuantity: number;
+  /** この出品で出品された数（売れた数 + 残り） */
+  totalQuantity: number;
+};
+
+export async function getItemSales(
+  itemId: string,
+  config: EbayConfig = readEbayConfig(),
+  fetchFn: typeof fetch = fetch,
+): Promise<ItemSales> {
+  const token = await getAppAccessToken(config, fetchFn);
+  const res = await fetchFn(`${BASE_URLS[config.environment]}/buy/browse/v1/item/${encodeURIComponent(itemId)}`, {
+    headers: { Authorization: `Bearer ${token}`, "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE_ID, Accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    if (res.status === 401) clearTokenCache();
+    throw new EbayApiError(`eBay の出品情報の取得に失敗しました（HTTP ${res.status}）。`, 502);
+  }
+  const data = (await res.json()) as {
+    estimatedAvailabilities?: { estimatedSoldQuantity?: number; estimatedAvailableQuantity?: number }[];
+  };
+  const a = data.estimatedAvailabilities?.[0] ?? {};
+  const soldQuantity = Math.max(0, Number(a.estimatedSoldQuantity) || 0);
+  const available = Math.max(0, Number(a.estimatedAvailableQuantity) || 0);
+  return { soldQuantity, totalQuantity: soldQuantity + available };
 }

@@ -21,10 +21,14 @@ import { fetchRakuten, type RakutenCredentials, type RakutenResult } from "@/lib
 import {
   DEFAULT_CRITERIA,
   evaluateCandidate,
+  MIN_RANKS,
   PRICE_BASES,
+  RANK_INFO,
   type Evaluation,
+  type MinRank,
   type PriceBasis,
   type TreasureCriteria,
+  type TurnoverRank,
 } from "@/lib/researchProfit";
 import {
   DEFAULT_MAX_LOOKUPS,
@@ -80,7 +84,15 @@ const SETTING_FIELDS: { key: keyof Settings; label: string }[] = [
   { key: "internationalShippingJpy", label: "国際送料の初期値（円）" },
 ];
 
-const BASIS_SHORT: Record<PriceBasis, string> = { p25: "安い方25%", median: "中央値", min: "最安値" };
+const BASIS_SHORT: Record<PriceBasis, string> = { sold: "売れている出品", p25: "安い方25%", median: "中央値", min: "最安値" };
+
+const RANK_STYLE: Record<TurnoverRank, string> = {
+  S: "bg-green-600 text-white",
+  A: "bg-sky-600 text-white",
+  B: "bg-amber-500 text-black",
+  C: "bg-red-600 text-white",
+  unknown: "border border-black/30 dark:border-white/40",
+};
 const SOURCE_LABEL: Record<DomesticOffer["source"], string> = { rakuten: "楽天", yahoo: "Yahoo!" };
 
 /** 0 以上の数値として読めれば数値、読めなければ null */
@@ -158,10 +170,12 @@ export default function ResearchDashboard() {
     () => Object.fromEntries(Object.entries(settings).map(([k, v]) => [k, String(v)])) as Record<keyof Settings, string>,
   );
   const [presets, setPresets] = useState<ResearchPreset[]>(() => loadJson<ResearchPreset[]>(PRESETS_KEY) ?? DEFAULT_PRESETS);
-  const [criteria, setCriteria] = useState<TreasureCriteria>(() => ({
-    ...DEFAULT_CRITERIA,
-    ...loadJson<Partial<TreasureCriteria>>(CRITERIA_KEY),
-  }));
+  const [criteria, setCriteria] = useState<TreasureCriteria>(() => {
+    const saved = loadJson<Partial<TreasureCriteria>>(CRITERIA_KEY);
+    // 回転率ランクの追加前に保存した条件は、売価の初期値（安い方から25%）を新しい初期値（売れている出品の価格）に切り替える
+    if (saved && saved.minRank === undefined && saved.basis === "p25") saved.basis = DEFAULT_CRITERIA.basis;
+    return { ...DEFAULT_CRITERIA, ...saved };
+  });
   const [criteriaInputs, setCriteriaInputs] = useState<Record<string, string>>(() =>
     Object.fromEntries(Object.entries(criteria).map(([k, v]) => [k, String(v)])),
   );
@@ -329,6 +343,10 @@ export default function ResearchDashboard() {
       setCriteria((prev) => ({ ...prev, basis: value as PriceBasis }));
       return;
     }
+    if (key === "minRank") {
+      setCriteria((prev) => ({ ...prev, minRank: value as MinRank }));
+      return;
+    }
     const n = toNonNegativeNumber(value);
     if (n !== null) setCriteria((prev) => ({ ...prev, [key]: n }));
   }
@@ -434,7 +452,21 @@ export default function ResearchDashboard() {
                 ))}
               </select>
             </label>
+            <label className="col-span-2 flex min-w-0 flex-col gap-1 text-sm lg:col-span-1">
+              <span>回転率ランク（推定）</span>
+              <select value={criteria.minRank} onChange={(e) => handleCriteriaChange("minRank", e.target.value)} className={INPUT_CLASS}>
+                {MIN_RANKS.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
+          <p className="text-xs opacity-60">
+            eBay の落札データ（Sold）は API で取得できないため、複数個まとめて出品されている商品の「売れた数」から実売価格と回転率を推定しています。
+            中古の 1 点ものは販売数が分からず「?（不明）」になるので、「eBay 落札済み」で確認してください。
+          </p>
         </div>
       </details>
 
@@ -1065,6 +1097,12 @@ function CandidateCard({ row, criteria }: { row: Row; criteria: TreasureCriteria
         <div className="shrink-0 text-right">
           <div className={`text-lg font-bold ${profit.profitJpy >= 0 ? "text-green-600" : "text-red-600"}`}>{yen.format(profit.profitJpy)}</div>
           <div className="text-xs opacity-70">利益率 {profit.marginPercent.toFixed(1)}%</div>
+          <div
+            className={`mt-1 inline-block rounded px-1.5 text-xs font-bold ${RANK_STYLE[evaluation.rank]}`}
+            title={RANK_INFO[evaluation.rank].hint}
+          >
+            回転 {RANK_INFO[evaluation.rank].label}
+          </div>
         </div>
       </div>
 
@@ -1080,8 +1118,17 @@ function CandidateCard({ row, criteria }: { row: Row; criteria: TreasureCriteria
         <dd className="text-right">
           {usd.format(evaluation.ebayPriceUsd)}
           <span className="block text-xs opacity-60">
-            {BASIS_SHORT[criteria.basis]}・比較 {ebay.count}件（ヒット {ebay.total}件）
+            {BASIS_SHORT[evaluation.usedBasis]}・比較 {ebay.count}件（ヒット {ebay.total}件）
           </span>
+        </dd>
+        <dt className="opacity-70">売れ行き</dt>
+        <dd className="text-right">
+          {RANK_INFO[evaluation.rank].hint}
+          {ebay.sales && ebay.sales.multiQuantityListings > 0 && (
+            <span className="block text-xs opacity-60">
+              推定 月 {ebay.sales.estimatedMonthlySales} 個・まとめ出品 {ebay.sales.multiQuantityListings}/{ebay.sales.checkedListings} 件で計 {ebay.sales.soldTotal} 個販売
+            </span>
+          )}
         </dd>
         <dt className="opacity-70">手数料・送料</dt>
         <dd className="text-right">

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "./profit";
-import { DEFAULT_CRITERIA, evaluateCandidate } from "./researchProfit";
+import { DEFAULT_CRITERIA, evaluateCandidate, turnoverRank } from "./researchProfit";
 import type { Candidate, EbayMarket } from "./researchTypes";
 
 const market: EbayMarket = {
@@ -99,5 +99,42 @@ describe("価格比率（付属品の誤マッチング対策）", () => {
       2000,
     )!;
     expect(ev.isTreasure).toBe(true);
+  });
+});
+
+describe("回転率ランクと売れている出品の価格", () => {
+  const sales = (s: Partial<NonNullable<EbayMarket["sales"]>>) => ({
+    checkedListings: 8,
+    multiQuantityListings: 3,
+    soldTotal: 20,
+    estimatedMonthlySales: 2,
+    soldPriceMedianUsd: 550,
+    ...s,
+  });
+
+  it("推定販売数からランクを決め、販売数が分からないときは不明（C とは区別）", () => {
+    expect(turnoverRank(sales({ estimatedMonthlySales: 6 }))).toBe("S");
+    expect(turnoverRank(sales({ estimatedMonthlySales: 1 }))).toBe("A");
+    expect(turnoverRank(sales({ estimatedMonthlySales: 0.4 }))).toBe("B");
+    expect(turnoverRank(sales({ soldTotal: 0, estimatedMonthlySales: 0 }))).toBe("C");
+    expect(turnoverRank(sales({ multiQuantityListings: 0 }))).toBe("unknown");
+    expect(turnoverRank(undefined)).toBe("unknown");
+  });
+
+  it("売れている出品の価格を売価に使い、なければ安い方から25%で代用して知らせる", () => {
+    const withSales = evaluateCandidate(candidate({ ebay: { ...market, sales: sales({}) } }), DEFAULT_SETTINGS, DEFAULT_CRITERIA, 2000)!;
+    expect(withSales).toMatchObject({ ebayPriceUsd: 550, usedBasis: "sold", rank: "A" });
+
+    const without = evaluateCandidate(candidate(), DEFAULT_SETTINGS, DEFAULT_CRITERIA, 2000)!;
+    expect(without).toMatchObject({ ebayPriceUsd: 500, usedBasis: "p25", rank: "unknown" });
+    expect(without.notes.join()).toMatch(/売れた実績のある出品が見つからず/);
+  });
+
+  it("回転率ランクの条件に届かなければお宝にしない（不明も含む）", () => {
+    const c = candidate({ ebay: { ...market, sales: sales({ estimatedMonthlySales: 0.4 }) } });
+    expect(evaluateCandidate(c, DEFAULT_SETTINGS, { ...DEFAULT_CRITERIA, basis: "p25" }, 2000)!.isTreasure).toBe(true);
+    const strict = { ...DEFAULT_CRITERIA, basis: "p25" as const, minRank: "A" as const };
+    expect(evaluateCandidate(c, DEFAULT_SETTINGS, strict, 2000)!.isTreasure).toBe(false);
+    expect(evaluateCandidate(candidate(), DEFAULT_SETTINGS, strict, 2000)!.isTreasure).toBe(false);
   });
 });

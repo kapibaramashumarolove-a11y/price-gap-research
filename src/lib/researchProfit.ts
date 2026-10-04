@@ -3,13 +3,14 @@
 //   利益 = (eBay 売価 − eBay 手数料) × 為替 − (国内仕入れ値 + 国内送料) − 国際送料
 
 import { calculateProfit, type ProfitResult, type Settings } from "./profit";
-import type { Candidate, DomesticOffer } from "./researchTypes";
+import type { Candidate, DomesticOffer, SalesSignal } from "./researchTypes";
 
 /** eBay の相場として使う値 */
-export type PriceBasis = "p25" | "median" | "min";
+export type PriceBasis = "sold" | "p25" | "median" | "min";
 
 export const PRICE_BASES: { id: PriceBasis; label: string }[] = [
-  { id: "p25", label: "安い方から25%（おすすめ）" },
+  { id: "sold", label: "売れている出品の価格（実売に近い・なければ安い方から25%）" },
+  { id: "p25", label: "安い方から25%" },
   { id: "median", label: "中央値" },
   { id: "min", label: "最安値" },
 ];
@@ -26,6 +27,8 @@ export type TreasureCriteria = {
    */
   minPriceRatioPercent: number;
   basis: PriceBasis;
+  /** お宝にする回転率ランクの下限（none: 問わない）。ランクが「不明」の商品は none のときだけお宝になる */
+  minRank: MinRank;
   /** 送料別・送料不明の国内商品に足す送料の目安 [円] */
   domesticShippingJpy: number;
 };
@@ -35,9 +38,49 @@ export const DEFAULT_CRITERIA: TreasureCriteria = {
   minMarginPercent: 15,
   minEbayListings: 3,
   minPriceRatioPercent: 25,
-  basis: "p25",
+  basis: "sold",
+  minRank: "none",
   domesticShippingJpy: 800,
 };
+
+// ---- 回転率ランク（推定） ----
+
+/** S: 月 5 個以上 / A: 月 1〜4 個 / B: 月 1 個未満（売れた実績あり） / C: 売れた実績なし / unknown: 販売数が分からない */
+export type TurnoverRank = "S" | "A" | "B" | "C" | "unknown";
+export type MinRank = "none" | "B" | "A" | "S";
+
+export const MIN_RANKS: { id: MinRank; label: string }[] = [
+  { id: "none", label: "問わない" },
+  { id: "B", label: "B 以上（売れた実績あり）" },
+  { id: "A", label: "A 以上（月 1 個以上）" },
+  { id: "S", label: "S のみ（月 5 個以上）" },
+];
+
+export const RANK_INFO: Record<TurnoverRank, { label: string; hint: string }> = {
+  S: { label: "S", hint: "即売れ（推定 月 5 個以上）" },
+  A: { label: "A", hint: "高回転（推定 月 1〜4 個）" },
+  B: { label: "B", hint: "低回転（推定 月 1 個未満）" },
+  C: { label: "C", hint: "売れた実績が見つからない（リスク高）" },
+  unknown: { label: "?", hint: "販売数が分からない（中古の 1 点ものなど）。「eBay 落札済み」で確認してください" },
+};
+
+/**
+ * 売れ行きの推定から回転率ランクを決める。
+ * 販売数が分かる出品（複数個まとめて出品しているもの）がなければ「不明」にする（C＝リスク高とは区別する）。
+ */
+export function turnoverRank(sales: SalesSignal | undefined): TurnoverRank {
+  if (!sales || sales.multiQuantityListings === 0) return "unknown";
+  if (sales.soldTotal === 0) return "C";
+  if (sales.estimatedMonthlySales >= 5) return "S";
+  if (sales.estimatedMonthlySales >= 1) return "A";
+  return "B";
+}
+
+const RANK_ORDER: Record<TurnoverRank, number> = { S: 3, A: 2, B: 1, C: 0, unknown: -1 };
+
+function meetsMinRank(rank: TurnoverRank, min: MinRank): boolean {
+  return min === "none" || RANK_ORDER[rank] >= RANK_ORDER[min];
+}
 
 export type Evaluation = {
   /** 送料を含めて一番安い国内の商品 */
@@ -47,16 +90,23 @@ export type Evaluation = {
   domesticShippingJpy: number;
   /** 計算に使った eBay 売価 [USD] */
   ebayPriceUsd: number;
+  /** 売価として実際に使った値（「売れている出品の価格」がなく安い方から25%で代用したときは p25） */
+  usedBasis: PriceBasis;
+  rank: TurnoverRank;
   profit: ProfitResult;
   isTreasure: boolean;
   /** お宝にならなかった理由（相場の件数不足など） */
   notes: string[];
 };
 
-function basisPrice(candidate: Candidate, basis: PriceBasis): number | null {
+function basisPrice(candidate: Candidate, basis: PriceBasis): { price: number | null; usedBasis: PriceBasis } {
   const m = candidate.ebay;
-  if (!m) return null;
-  return basis === "p25" ? m.p25Usd : basis === "median" ? m.medianUsd : m.minUsd;
+  if (!m) return { price: null, usedBasis: basis };
+  if (basis === "sold") {
+    const sold = m.sales?.soldPriceMedianUsd ?? null;
+    return sold !== null ? { price: sold, usedBasis: "sold" } : { price: m.p25Usd, usedBasis: "p25" };
+  }
+  return { price: basis === "p25" ? m.p25Usd : basis === "median" ? m.medianUsd : m.minUsd, usedBasis: basis };
 }
 
 export function shippingCost(offer: DomesticOffer, criteria: Pick<TreasureCriteria, "domesticShippingJpy">): number {
@@ -70,8 +120,9 @@ export function evaluateCandidate(
   criteria: TreasureCriteria,
   internationalShippingJpy?: number,
 ): Evaluation | undefined {
-  const ebayPriceUsd = basisPrice(candidate, criteria.basis);
+  const { price: ebayPriceUsd, usedBasis } = basisPrice(candidate, criteria.basis);
   if (ebayPriceUsd === null || candidate.offers.length === 0) return undefined;
+  const rank = turnoverRank(candidate.ebay?.sales);
 
   // eBay 相場に比べて安すぎる国内商品は、付属品（保護フィルム・ケースなど）や別商品の可能性が高いので仕入れ先に選ばない
   const referenceJpy = (candidate.ebay?.medianUsd ?? ebayPriceUsd) * settings.usdJpy;
@@ -108,8 +159,16 @@ export function evaluateCandidate(
     notes.push(`eBay 相場の ${criteria.minPriceRatioPercent}% 未満の安すぎる国内商品 ${suspiciousCount} 件は、付属品の可能性があるため除きました`);
   }
 
+  if (criteria.basis === "sold" && usedBasis !== "sold") {
+    notes.push("売れた実績のある出品が見つからず、出品中価格（安い方から25%）で計算しています");
+  }
+  if (!meetsMinRank(rank, criteria.minRank)) {
+    notes.push(`回転率ランクが条件（${MIN_RANKS.find((r) => r.id === criteria.minRank)?.label}）に届かないため、お宝から外しています`);
+  }
+
   const isTreasure =
     !tooCheap &&
+    meetsMinRank(rank, criteria.minRank) &&
     count >= criteria.minEbayListings &&
     profit.profitJpy >= criteria.minProfitJpy &&
     profit.marginPercent >= criteria.minMarginPercent;
@@ -119,6 +178,8 @@ export function evaluateCandidate(
     purchaseJpy: offer.priceJpy + domesticShippingJpy,
     domesticShippingJpy,
     ebayPriceUsd,
+    usedBasis,
+    rank,
     profit,
     isTreasure,
     notes,
