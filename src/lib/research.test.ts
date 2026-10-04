@@ -165,7 +165,8 @@ describe("商品指定（kind: item）", () => {
         now: () => 0,
       },
     );
-    expect(res.stats).toMatchObject({ rakuten: 2, yahoo: 2, excluded: 1, unidentified: 1 });
+    // ジャンク（楽天）と「F3 用 ストラップ」（付属品）を除外
+    expect(res.stats).toMatchObject({ rakuten: 2, yahoo: 2, excluded: 2, unidentified: 0 });
     expect(res.candidates).toHaveLength(1);
     const c = res.candidates[0];
     expect(c).toMatchObject({ kind: "item", label: "中古" });

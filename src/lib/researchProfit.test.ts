@@ -60,3 +60,44 @@ describe("evaluateCandidate", () => {
     expect(evaluateCandidate(candidate({ ebay: { ...market, p25Usd: null } }), DEFAULT_SETTINGS, DEFAULT_CRITERIA)).toBeUndefined();
   });
 });
+
+describe("価格比率（付属品の誤マッチング対策）", () => {
+  // eBay 相場（中央値）$600 × 150 円 = 90,000 円。25% は 22,500 円
+  it("eBay 相場の 25% 未満の国内商品は仕入れ先に選ばない", () => {
+    const ev = evaluateCandidate(
+      candidate({
+        offers: [
+          { source: "yahoo", title: "ZV-E10 液晶保護フィルム", priceJpy: 980, shipping: "free", url: "y1", shopName: "" },
+          { source: "rakuten", title: "ZV-E10 ボディ", priceJpy: 50000, shipping: "free", url: "r1", shopName: "" },
+        ],
+      }),
+      DEFAULT_SETTINGS,
+      DEFAULT_CRITERIA,
+      2000,
+    )!;
+    expect(ev.offer.priceJpy).toBe(50000);
+    expect(ev.notes.join()).toMatch(/1 件は、付属品の可能性/);
+  });
+
+  it("すべて安すぎるときはお宝にしない（偽のお宝を出さない）", () => {
+    const ev = evaluateCandidate(
+      candidate({ offers: [{ source: "yahoo", title: "ZV-E10 ケース", priceJpy: 1500, shipping: "free", url: "y", shopName: "" }] }),
+      DEFAULT_SETTINGS,
+      DEFAULT_CRITERIA,
+      2000,
+    )!;
+    expect(ev.profit.marginPercent).toBeGreaterThan(50); // 計算上は「超お宝」に見える
+    expect(ev.isTreasure).toBe(false);
+    expect(ev.notes.join()).toMatch(/付属品・別商品の可能性が高い/);
+  });
+
+  it("0% にすると判定しない", () => {
+    const ev = evaluateCandidate(
+      candidate({ offers: [{ source: "yahoo", title: "x", priceJpy: 1500, shipping: "free", url: "y", shopName: "" }] }),
+      DEFAULT_SETTINGS,
+      { ...DEFAULT_CRITERIA, minPriceRatioPercent: 0 },
+      2000,
+    )!;
+    expect(ev.isTreasure).toBe(true);
+  });
+});

@@ -61,7 +61,12 @@ function downloadCsv(fileName: string, text: string) {
 }
 
 
-type PresetResult = { presetName: string; response: ResearchResponse };
+type PresetResult = {
+  presetName: string;
+  response: ResearchResponse;
+  /** 商品指定で、付属品を除くため eBay 相場から自動で決めた国内の最低価格 [円] */
+  autoMinPriceJpy?: number;
+};
 
 const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 });
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -234,17 +239,41 @@ export default function ResearchDashboard() {
     return rakutenCredentials.current;
   }
 
+  /**
+   * 商品指定のとき、先に eBay 相場を調べて「これより安い国内商品は付属品」という最低価格を決める。
+   * 楽天・Yahoo! の検索にこの最低価格を付けると、保護フィルムやケースなどの安い付属品で検索結果の枠が埋まらない。
+   * 相場が取れないときや判定を無効（0%）にしているときは undefined
+   */
+  async function itemMinPrice(preset: ResearchPreset): Promise<number | undefined> {
+    if (preset.kind !== "item" || criteria.minPriceRatioPercent <= 0) return undefined;
+    try {
+      const res = await fetch("/api/research/market", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(preset),
+      });
+      if (!res.ok) return undefined;
+      const median = (await res.json()).market?.medianUsd;
+      return typeof median === "number" ? Math.floor((median * settings.usdJpy * criteria.minPriceRatioPercent) / 100) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   async function runPreset(preset: ResearchPreset): Promise<void> {
     setErrors((prev) => ({ ...prev, [preset.id]: "" }));
     try {
       // 楽天はブラウザから直接検索する（楽天が「許可されたWebサイト」をブラウザの送る URL で確認するため）。
       // 結果（またはエラー）をサーバーに渡し、サーバーは Yahoo! と eBay を調べる
+      const autoMinPriceJpy = await itemMinPrice(preset);
+      const target =
+        autoMinPriceJpy !== undefined && autoMinPriceJpy > (preset.minPriceJpy ?? 0) ? { ...preset, minPriceJpy: autoMinPriceJpy } : preset;
       const creds = await loadRakutenCredentials();
-      const rakuten: RakutenResult | undefined = creds ? await fetchRakuten(preset, creds, window.location.origin) : undefined;
+      const rakuten: RakutenResult | undefined = creds ? await fetchRakuten(target, creds, window.location.origin) : undefined;
       const res = await fetch("/api/research", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...preset, rakuten }),
+        body: JSON.stringify({ ...target, rakuten }),
       });
       if (res.status === 401) {
         window.location.reload();
@@ -255,7 +284,10 @@ export default function ResearchDashboard() {
         setErrors((prev) => ({ ...prev, [preset.id]: body.error ?? `取得に失敗しました（HTTP ${res.status}）。` }));
         return;
       }
-      setResults((prev) => ({ ...prev, [preset.id]: { presetName: preset.name, response: body as ResearchResponse } }));
+      setResults((prev) => ({
+        ...prev,
+        [preset.id]: { presetName: preset.name, response: body as ResearchResponse, autoMinPriceJpy: target === preset ? undefined : autoMinPriceJpy },
+      }));
     } catch {
       setErrors((prev) => ({ ...prev, [preset.id]: "サーバーに接続できませんでした。" }));
     }
@@ -381,6 +413,11 @@ export default function ResearchDashboard() {
               label="eBay の比較件数（件以上）"
               value={criteriaInputs.minEbayListings}
               onChange={(v) => handleCriteriaChange("minEbayListings", v)}
+            />
+            <NumberField
+              label="付属品とみなす価格（eBay 相場の%未満）"
+              value={criteriaInputs.minPriceRatioPercent}
+              onChange={(v) => handleCriteriaChange("minPriceRatioPercent", v)}
             />
             <NumberField
               label="送料別のときの国内送料（円）"
@@ -523,7 +560,7 @@ export default function ResearchDashboard() {
                   </button>
                 </div>
                 {errors[preset.id] && <p className="text-sm text-red-600">{errors[preset.id]}</p>}
-                {result && <ResultStats response={result.response} />}
+                {result && <ResultStats response={result.response} autoMinPriceJpy={result.autoMinPriceJpy} />}
               </li>
             );
           })}
@@ -636,7 +673,7 @@ export default function ResearchDashboard() {
   );
 }
 
-function ResultStats({ response }: { response: ResearchResponse }) {
+function ResultStats({ response, autoMinPriceJpy }: { response: ResearchResponse; autoMinPriceJpy?: number }) {
   const { stats } = response;
   const count = (n: number | null) => (n === null ? "—" : `${n}件`);
   return (
@@ -644,6 +681,7 @@ function ResultStats({ response }: { response: ResearchResponse }) {
       楽天 {count(stats.rakuten)}・Yahoo! {count(stats.yahoo)} → 除外 {stats.excluded}件・識別できず {stats.unidentified}件 → 商品{" "}
       {response.candidates.length}件を eBay で調査
       {response.skippedLookups > 0 && `（上限のため ${response.skippedLookups}件は未調査）`}
+      {autoMinPriceJpy !== undefined && `・付属品を除くため ${yen.format(autoMinPriceJpy)} 以上で検索`}
     </p>
   );
 }

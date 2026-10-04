@@ -140,7 +140,65 @@ export function isExcludedOffer(kind: ResearchKind, title: string, ngWords: read
   // 複数箱のセット（2BOX・3箱など）や 1 パックだけの出品は BOX 1 個の値段と比べられない
   if (kind === "sealed" && /(?<!\d)[2-9]\s*(BOX|箱)|\d+\s*個セット|(?<!\d)1\s*パック(?!入)/i.test(t)) return true;
   if (kind === "single" && isGraded(t)) return true;
+  if ((kind === "item" || kind === "other") && isAccessoryTitle(t)) return true;
   return false;
+}
+
+// ---- 付属品・アクセサリーの出品の見分け ----
+// 型番で検索すると「ZV-E10 液晶保護フィルム」「ZV-E10用 ケース」のような付属品も一緒に見つかる。
+// ただし中古の本体の出品も「元箱・説明書・バッテリー付き」「ストラップ欠品」のように付属品の名前を含むので、
+// 単語があるだけでは除外せず、「付き・付属・欠品」など付属品の有無の説明になっていないときだけ付属品とみなす。
+
+/** 付属品そのものの出品によく出る言葉 */
+const ACCESSORY_WORDS = [
+  "保護フィルム",
+  "液晶フィルム",
+  "ガラスフィルム",
+  "保護ガラス",
+  "ケース",
+  "カバー",
+  "キャップ",
+  "フード",
+  "バッテリー",
+  "充電器",
+  "チャージャー",
+  "ストラップ",
+  "説明書",
+  "マニュアル",
+  "グリップ",
+  "ケージ",
+  "アダプター",
+  "アダプタ",
+  "ケーブル",
+  "スキンシール",
+  "レンズプロテクター",
+  "パーツ",
+];
+
+/** 付属品の有無を説明する言い方（この言葉が後ろに続けば、本体の出品の説明とみなす） */
+const INCLUDED_CONTEXT = /^\s*[^\s]{0,12}?(付|附|同梱|あり|有り|込|欠品|欠|なし|無し|セット)/;
+
+/** 本体ではなく付属品・部品・空箱だけの出品だと分かる言い方 */
+const ACCESSORY_ONLY =
+  /箱のみ|空箱|元箱のみ|ケースのみ|説明書のみ|本体なし|本体無し|本体は付属しません|パーツのみ|部品のみ|攻略本|ガイドブック|フィルム(?!\s*(カメラ|一眼|機|式))/;
+
+/**
+ * 「ZV-E10用」「E10専用」のように、型番のすぐ後に「用・専用」が付く（その機種向けの付属品）。
+ * 「未使用」や、本体を説明する「Vlog用カメラ」などは含めない
+ */
+const FOR_MODEL = /[A-Za-z0-9)）\]】]\s*(専用|用)(?![途意品])(?!\s*(カメラ|機|ビデオ|ゲーム機|本体))/;
+
+/** タイトルが付属品・アクセサリーの出品か */
+export function isAccessoryTitle(title: string): boolean {
+  const t = normalizeText(title);
+  if (ACCESSORY_ONLY.test(t) || FOR_MODEL.test(t)) return true;
+  return ACCESSORY_WORDS.some((word) => {
+    for (let i = t.indexOf(word); i >= 0; i = t.indexOf(word, i + 1)) {
+      // 「バッテリー付き」「ストラップ欠品」は本体の出品の説明なので付属品とはみなさない
+      if (!INCLUDED_CONTEXT.test(t.slice(i + word.length))) return true;
+    }
+    return false;
+  });
 }
 
 // ---- eBay の検索条件 ----
@@ -273,7 +331,7 @@ const EBAY_ITEM_EXCLUDE =
   /\bfor parts\b|\bnot working\b|\bjunk\b|\bbroken\b|\bas[- ]is\b|\b(box|case|manual|cover) only\b|\bempty box\b|\blot\b|\bbundle\b|\breplica\b/i;
 /** 本体ではなく部品・付属品の出品によく出る言葉 */
 const EBAY_ACCESSORY =
-  /\b(drag washers?|washers?|screws?|knobs?|part no|parts only|replacement|repair parts?|power supply|ac adapter|adapter|cables?|decals?|stickers?)\b/i;
+  /\b(drag washers?|washers?|screws?|knobs?|part no|parts only|replacement|repair parts?|power supply|ac adapter|adapter|cables?|decals?|stickers?|screen protector|protector|tempered glass|skins?|cage|silicone|compatible with)\b/i;
 
 /**
  * 商品指定の eBay 検索。JAN があれば JAN（GTIN）で、なければ英語キーワードで探す。

@@ -250,6 +250,20 @@ export function matchItemOffers(
   return { matched, excluded, unmatched };
 }
 
+/**
+ * 商品指定の eBay 相場を調べる。
+ * 画面は国内を検索する前にこれを呼び、相場から「これより安い国内商品は付属品」という最低価格を決めて国内検索に使う
+ * （安い付属品で検索結果の枠が埋まらないように）。同じ検索は 30 分使い回すので、eBay の利用回数は増えない。
+ * @returns 相場、または調べられなかった理由
+ */
+export async function lookUpItemMarket(
+  request: Pick<ResearchRequest, "jan" | "ebayKeyword" | "condition">,
+  deps: ResearchDeps = defaultResearchDeps,
+): Promise<EbayMarket | string> {
+  const plans = planItemEbaySearch({ jan: request.jan, ebayKeyword: request.ebayKeyword, condition: request.condition ?? "new" });
+  return plans ? lookUpEbay(plans.primary, plans.fallback, deps) : "eBay 用の英語キーワードか JAN を設定してください。";
+}
+
 /** 同時に動かす数を制限して、配列の各要素に非同期処理を行う */
 async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
@@ -310,8 +324,7 @@ export async function runResearch(
   if (request.kind === "item") {
     const { matched, excluded, unmatched } = matchItemOffers(request, allOffers);
     if (matched.length === 0) return response([], excluded, unmatched);
-    const plans = planItemEbaySearch({ jan: request.jan, ebayKeyword: request.ebayKeyword, condition: request.condition ?? "new" });
-    const market = plans ? await lookUpEbay(plans.primary, plans.fallback, deps) : "eBay 用の英語キーワードか JAN を設定してください。";
+    const market = await lookUpItemMarket(request, deps);
     const conditionLabel = ITEM_CONDITIONS.find((c) => c.id === (request.condition ?? "new"))?.label ?? "";
     const candidate: Candidate = {
       key: `item:${request.jan || keywordTokens(request.keyword).join(" ")}|${request.condition ?? "new"}`,

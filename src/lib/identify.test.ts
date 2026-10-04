@@ -5,6 +5,7 @@ import {
   extractJan,
   extractModelNumber,
   identify,
+  isAccessoryTitle,
   isExcludedOffer,
   isPsa10,
   isValidJan,
@@ -141,5 +142,52 @@ describe("ebayWebSearchUrl", () => {
     expect(ebayWebSearchUrl("205/172 PSA 10", true)).toBe(
       "https://www.ebay.com/sch/i.html?_nkw=205%2F172+PSA+10&LH_Sold=1&LH_Complete=1",
     );
+  });
+});
+
+describe("isAccessoryTitle（付属品・アクセサリーの出品）", () => {
+  it("付属品そのものの出品は付属品とみなす", () => {
+    for (const title of [
+      "SONY ZV-E10 液晶保護フィルム 2枚入り",
+      "ZV-E10用 ケース レザー",
+      "ソニー ZV-E10 専用 シリコンカバー",
+      "ZV-E10 対応 ボディキャップ",
+      "ZV-E10 バッテリーグリップ",
+      "ニコン F3 取扱説明書",
+      "SONY ZV-E10 元箱のみ",
+      "ゼルダの伝説 神々のトライフォース 攻略本",
+      "Nikon F3 用 アイピース",
+      // Yahoo! の実際の検索結果より
+      "SONY ZV-E10 II / ZV-E1 専用 ガラスフィルム 液晶 保護 硬度9H 【 2枚 】セット",
+      "WERJIA 収納ケースソニー(SONY) VLOGCAM ZV-E10L/ZV-E10カメラ専用収納ケースケース対応1",
+      "SmallRig ZV-E10用グリップ付きケージ/内蔵クイックリリースプレート付き",
+      "ソニー リチャージャブルバッテリーパック「NP-FZ100」 NP-FZ100 返品種別A",
+    ]) {
+      expect(isAccessoryTitle(title), title).toBe(true);
+    }
+  });
+
+  it("本体の出品（付属品の有無の説明・フィルムカメラ・未使用など）は残す", () => {
+    for (const title of [
+      "SONY ZV-E10 ボディ 元箱・説明書・バッテリー付き",
+      "ソニー ZV-E10 ボディ ストラップ欠品",
+      "ZV-E10 ボディ レンズキャップ 付属品多数",
+      "Nikon F3 フィルムカメラ ボディ",
+      "ニコン F3 ボディ 未使用に近い 使用感少なめ",
+      "SONY ZV-E10 4K対応 ボディ",
+      "BOSS DS-1 ディストーション 箱・説明書あり",
+      "シマノ 22ステラ C3000XG 新品",
+      // Yahoo! の実際の検索結果より
+      "SONY(ソニー) Vlog用カメラ レンズ交換式VLOGCAM APS-C ミラーレス一眼カメラ ZV-E10 ボディ",
+      "[新品]【グリップセット】SONY ソニー VLOGCAM ZV-E10 II パワーズームレンズキット ブラック",
+    ]) {
+      expect(isAccessoryTitle(title), title).toBe(false);
+    }
+  });
+
+  it("商品指定・その他の種類で除外に使う（カードなどには使わない）", () => {
+    expect(isExcludedOffer("item", "ZV-E10用 ケース")).toBe(true);
+    expect(isExcludedOffer("other", "ZV-E10用 ケース")).toBe(true);
+    expect(isExcludedOffer("single", "ピカチュウ AR 205/172 ケース入り")).toBe(false);
   });
 });
