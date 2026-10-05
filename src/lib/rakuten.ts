@@ -228,3 +228,73 @@ export function parseClientRakuten(value: unknown): RakutenResult | undefined {
   });
   return { offers };
 }
+
+// ---- 楽天市場ランキング（売れ筋から探す）----
+// https://webservice.rakuten.co.jp/documentation/ichiba-item-ranking
+// 検索と同じく、ブラウザから直接呼ぶ（「許可されたWebサイト」の確認のため）。
+
+export const RAKUTEN_RANKING_URL = "https://openapi.rakuten.co.jp/ichibaranking/api/IchibaItem/Ranking/20220601";
+
+export type RankingPeriod = "realtime" | "daily";
+
+/** ランキングの商品（何位か付き） */
+export type RankedOffer = RawDomesticOffer & { rank: number };
+
+export type RakutenRankingResult = { offers: RankedOffer[] } | { error: string };
+
+export function buildRakutenRankingUrl(
+  params: { genreId: string; period: RankingPeriod; page: number },
+  creds: Pick<RakutenCredentials, "appId" | "affiliateId">,
+): URL {
+  const url = new URL(RAKUTEN_RANKING_URL);
+  url.searchParams.set("applicationId", creds.appId);
+  if (creds.affiliateId) url.searchParams.set("affiliateId", creds.affiliateId);
+  url.searchParams.set("format", "json");
+  url.searchParams.set("formatVersion", "2");
+  url.searchParams.set("genreId", params.genreId);
+  if (params.period === "realtime") url.searchParams.set("period", "realtime");
+  url.searchParams.set("page", String(params.page));
+  return url;
+}
+
+/** 楽天ランキングを 1 ページ（30 件）取得する */
+export async function fetchRakutenRanking(
+  params: { genreId: string; period: RankingPeriod; page: number },
+  creds: RakutenCredentials,
+  origin: string | undefined,
+  fetchFn: typeof fetch = fetch,
+): Promise<RakutenRankingResult> {
+  let res: Response;
+  try {
+    res = await fetchFn(buildRakutenRankingUrl(params, creds), { headers: { accessKey: creds.accessKey }, cache: "no-store" });
+  } catch {
+    return { error: "楽天ランキング: 接続できませんでした（通信エラー）。電波の良いところでもう一度試してください。" };
+  }
+  const data = (await res.json().catch(() => ({}))) as {
+    Items?: (RakutenItem & { rank?: number })[];
+    error?: string;
+    error_description?: string;
+    errors?: { errorMessage?: string };
+  };
+  if (!res.ok) {
+    const detail = data.errors?.errorMessage ?? data.error_description ?? `HTTP ${res.status}`;
+    return { error: rakutenErrorMessage(res.status, detail, origin).replace(/^楽天:/, "楽天ランキング:") };
+  }
+  const items = data.Items ?? [];
+  const offers = items.flatMap((item, i): RankedOffer[] => {
+    const [offer] = parseRakutenItems([item]);
+    return offer ? [{ ...offer, rank: Number(item.rank) || (params.page - 1) * 30 + i + 1 }] : [];
+  });
+  return { offers };
+}
+
+/** /api/discover に送られてきたランキングの商品を検査する（形がおかしいものは捨て、件数も上限で切る） */
+export function parseClientRanked(value: unknown, max: number): (RawDomesticOffer & { rank: number })[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, max).flatMap((raw) => {
+    const parsed = parseClientRakuten({ offers: [raw] });
+    const offer = parsed && "offers" in parsed ? parsed.offers[0] : undefined;
+    const rank = Number((raw as { rank?: unknown })?.rank);
+    return offer && Number.isInteger(rank) && rank > 0 ? [{ ...offer, rank }] : [];
+  });
+}

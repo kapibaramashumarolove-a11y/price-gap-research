@@ -63,6 +63,34 @@ export function isGraded(text: string): boolean {
   return /\b(PSA|BGS|CGC|ARS)\s*\d|鑑定/i.test(normalizeText(text));
 }
 
+/** 型番ではない英数字（サイズ・容量・年・ポイント倍率・規格など） */
+const NOT_MODEL =
+  /^(\d+(\.\d+)?(cm|mm|m|g|kg|ml|l|gb|tb|mb|w|v|mah|hz|khz|inch|in|ft|lbs?|oz|p|x|k|th|nd|rd|st|pcs|pc|set|cc|mp|fps|bit))$|^20\d\d$|^p\d+(倍)?$|^(usb|type)-?[a-c]$|^\d+(%|off)$|^[48]k$|^[3-6]g$|^x\d+$|^\d+x$|^wi-?fi\d*$|^bluetooth\d*(\.\d)?$|^hdmi\d*(\.\d)?$|^ps\d$|^ip\d+$|^\d+in\d+$/i;
+
+/**
+ * 楽天ランキングなどの商品名から、eBay で検索できる型番を取り出す（例:「【楽天1位】ソニー VLOGCAM ZV-E10 ボディ」→ "ZV-E10"）。
+ * 英字と数字を両方含む 3〜20 文字の単語（または HEG-S-KAAAA のような大文字の型番）を候補にし、サイズ・容量・年などは除く。
+ * ハイフン入りや 5 文字以上のもの（型番らしさが強い）を優先する。見つからなければ undefined
+ */
+export function extractModelKeyword(title: string): string | undefined {
+  const t = normalizeText(title)
+    // 【楽天1位】【送料無料】などの宣伝の括弧書きは除く
+    .replace(/【[^】]*】|［[^］]*］|\[[^\]]*\]|＜[^＞]*＞|<[^>]*>/g, " ");
+  const candidates = t
+    .split(/[\s/,、・|()（）「」]+/)
+    .map((w) => w.replace(/^[-.+]+|[-.+]+$/g, ""))
+    .filter((w) => /^[A-Za-z0-9][A-Za-z0-9\-.+]*$/.test(w))
+    .filter(
+      (w) =>
+        w.length >= 3 &&
+        w.length <= 20 &&
+        !NOT_MODEL.test(w) &&
+        // 英字と数字を両方含む（ZV-E10・C3000XG）か、数字のない大文字の型番（Nintendo の HEG-S-KAAAA）
+        ((/[A-Za-z]/.test(w) && /\d/.test(w)) || (/^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$/.test(w) && w.length >= 6)),
+    );
+  return candidates.find((w) => w.includes("-") || w.length >= 5) ?? candidates[0];
+}
+
 /** スニーカーなどの型番（例: Nike の DD1391-100） */
 export function extractModelNumber(text: string): string | undefined {
   return normalizeText(text).toUpperCase().match(/(?<![A-Z0-9])([A-Z]{2}\d{4}-\d{3})(?![0-9])/)?.[1];
@@ -355,15 +383,22 @@ export function planItemEbaySearch(params: {
   jan?: string;
   ebayKeyword?: string;
   condition: ItemCondition;
+  /**
+   * 国内の商品名・キーワード。型番の違い（ZV-E10 と ZV-E10L・ZV-E10 II）や
+   * ボディとレンズキットの違いを eBay 側でも揃えるのに使う（variantFilter）
+   */
+  variantReference?: string;
 }): { primary: EbaySearchPlan; fallback?: EbaySearchPlan } | undefined {
   const conditionIds = itemConditionIds(params.condition);
   const keyword = params.ebayKeyword?.trim();
+  const variant = keyword ? variantFilter(extractModelKeyword(keyword), `${params.variantReference ?? ""} ${keyword}`) : () => true;
   const keywordPlan: EbaySearchPlan | undefined = keyword
     ? {
         q: keyword,
         conditionIds,
         webQuery: keyword,
-        titleFilter: (t) => containsAllTokens(t, keywordTokens(keyword)) && !EBAY_ITEM_EXCLUDE.test(t) && !EBAY_ACCESSORY.test(t),
+        titleFilter: (t) =>
+          containsAllTokens(t, keywordTokens(keyword)) && !EBAY_ITEM_EXCLUDE.test(t) && !EBAY_ACCESSORY.test(t) && variant(t),
       }
     : undefined;
   if (params.jan) {
@@ -376,6 +411,48 @@ export function planItemEbaySearch(params: {
     return { primary, fallback: keywordPlan };
   }
   return keywordPlan ? { primary: keywordPlan } : undefined;
+}
+
+// ---- 型番の違い・ボディとキットの違いを揃える ----
+
+const GENERATION = /^(ii|iii|iv|v|vi|mark|mk|mk\.|m2|m3|m4|m5|2|3|4|5)$/i;
+const KIT_WORDS_EN = /\bkit\b|\blens(es)?\b|\d{2,3}\s?-\s?\d{2,3}\s?mm\b/i;
+const KIT_WORDS_JA = /キット|レンズ付|レンズセット|ズームレンズ/;
+const BODY_WORDS_JA = /ボディ|本体のみ|\bbody\b/i;
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 型番のすぐ後に「II」「Mark III」「M2」などの世代の表記が続くか */
+function hasGenerationAfter(text: string, modelNoHyphen: string): boolean {
+  const words = normalizeText(text).replace(/-/g, "").split(/[\s/,()（）]+/);
+  return words.some((w, i) => w.toLowerCase() === modelNoHyphen && i + 1 < words.length && GENERATION.test(words[i + 1]));
+}
+
+/**
+ * eBay の出品が、国内の商品と同じ型番・世代・形態（ボディ／キット）かを確かめる条件を作る。
+ * - 型番は前後に英数字が続かないこと（ZV-E10 に ZV-E10L・ZV-E10K は含めない。ハイフンの有無は区別しない）
+ * - 国内に「II・Mark III・M2」などの世代の表記がなければ、eBay でも型番の直後にないこと（逆も同じ）
+ * - 国内が「ボディ」なら eBay にキット・レンズの表記がないこと、国内が「キット」なら eBay にもあること
+ * @param model 型番（なければ型番の条件は付けない）
+ * @param reference 国内の商品名やキーワード
+ */
+export function variantFilter(model: string | undefined, reference: string): (ebayTitle: string) => boolean {
+  const ref = normalizeText(reference);
+  const isBody = BODY_WORDS_JA.test(ref) && !KIT_WORDS_JA.test(ref);
+  const isKit = KIT_WORDS_JA.test(ref) || /\bkit\b/i.test(ref);
+  const modelNoHyphen = model?.replace(/-/g, "").toLowerCase();
+  const refGeneration = modelNoHyphen ? hasGenerationAfter(ref, modelNoHyphen) : false;
+  const modelPattern = modelNoHyphen ? new RegExp(`(?<![a-z0-9])${escapeRegExp(modelNoHyphen)}(?![a-z0-9])`, "i") : undefined;
+  return (title) => {
+    const t = normalizeText(title);
+    if (modelPattern && !modelPattern.test(t.replace(/-/g, ""))) return false;
+    if (modelNoHyphen && hasGenerationAfter(t, modelNoHyphen) !== refGeneration) return false;
+    if (isBody && KIT_WORDS_EN.test(t)) return false;
+    if (isKit && !KIT_WORDS_EN.test(t)) return false;
+    return true;
+  };
 }
 
 /** eBay サイトの検索リンク。出品中は即決のみ、落札済みはオークションも含める */

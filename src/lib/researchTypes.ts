@@ -95,6 +95,8 @@ export type EbayMarket = {
   soldUrl: string;
   /** 売れ行きの推定（調べなかったときは undefined） */
   sales?: SalesSignal;
+  /** 比較した出品の発送元（日本・日本以外の件数） */
+  locations?: { jp: number; other: number };
 };
 
 /**
@@ -185,4 +187,21 @@ export const DEFAULT_PRESETS: ResearchPreset[] = [
     minPriceJpy: 3000,
     internationalShippingJpy: 1500,
   },
+];
+
+/**
+ * 「売れ筋から探す」で選べる楽天ランキングのジャンル（楽天市場のジャンル ID）。
+ * 型番で eBay と比べやすい、輸出向きのジャンルを中心にしている
+ */
+export const RANKING_GENRES: { id: string; label: string }[] = [
+  { id: "100212", label: "カメラ・光学機器" },
+  { id: "111961", label: "釣り（フィッシング）" },
+  { id: "112493", label: "楽器・音響機器" },
+  { id: "101205", label: "テレビゲーム" },
+  { id: "101164", label: "ホビー" },
+  { id: "566382", label: "おもちゃ" },
+  { id: "558929", label: "腕時計" },
+  { id: "211742", label: "TV・オーディオ・カメラ" },
+  { id: "564500", label: "スマホ・タブレット" },
+  { id: "100026", label: "パソコン・周辺機器" },
 ];

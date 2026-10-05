@@ -38,3 +38,12 @@ describe("商品指定（kind: item）の検査", () => {
     expect(parseResearchRequest({ kind: "item", keyword: "BOSS", ebayKeyword: "Boss", condition: "junk" })).toMatch(/状態/);
   });
 });
+
+describe("parseSettings / parseCriteria", () => {
+  it("正しい値はそのまま、おかしな値は初期値", async () => {
+    const { parseSettings, parseCriteria } = await import("./researchRequest");
+    expect(parseSettings({ usdJpy: 145, ebayFeeRate: -1, perOrderFeeUsd: "abc" })).toMatchObject({ usdJpy: 145, ebayFeeRate: 13.25, perOrderFeeUsd: 0.4 });
+    expect(parseCriteria({ minProfitJpy: 5000, basis: "median", minRank: "Z" })).toMatchObject({ minProfitJpy: 5000, basis: "median", minRank: "none" });
+    expect(parseCriteria(null).basis).toBe("sold");
+  });
+});

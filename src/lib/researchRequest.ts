@@ -1,6 +1,8 @@
 // /api/research に送られてきた JSON を検査して ResearchRequest にする（画面に返すエラーは日本語）。
 
 import { isValidJan, normalizeText } from "./identify";
+import { DEFAULT_SETTINGS, type Settings } from "./profit";
+import { DEFAULT_CRITERIA, MIN_RANKS, PRICE_BASES, type MinRank, type PriceBasis, type TreasureCriteria } from "./researchProfit";
 import {
   ITEM_CONDITIONS,
   MAX_LOOKUPS_LIMIT,
@@ -73,3 +75,41 @@ export function parseResearchRequest(body: unknown): ResearchRequest | string {
     ...(kind === "item" ? { jan, condition: (condition as ItemCondition | undefined) ?? "new" } : {}),
   };
 }
+
+// ---- /api/discover（売れ筋から探す）に送られてくる内容の検査 ----
+
+/** 0 以上の有限な数値ならその値、そうでなければ初期値 */
+function numberOr(value: unknown, fallback: number, max = 1_000_000_000): number {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n >= 0 && n <= max ? n : fallback;
+}
+
+/** 計算条件（為替・手数料・国際送料）。おかしな値は初期値にする */
+export function parseSettings(value: unknown): Settings {
+  const v = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
+  return {
+    usdJpy: numberOr(v.usdJpy, DEFAULT_SETTINGS.usdJpy, 10_000),
+    ebayFeeRate: numberOr(v.ebayFeeRate, DEFAULT_SETTINGS.ebayFeeRate, 100),
+    internationalFeeRate: numberOr(v.internationalFeeRate, DEFAULT_SETTINGS.internationalFeeRate, 100),
+    perOrderFeeUsd: numberOr(v.perOrderFeeUsd, DEFAULT_SETTINGS.perOrderFeeUsd, 1000),
+    internationalShippingJpy: numberOr(v.internationalShippingJpy, DEFAULT_SETTINGS.internationalShippingJpy),
+  };
+}
+
+/** お宝の条件。おかしな値は初期値にする */
+export function parseCriteria(value: unknown): TreasureCriteria {
+  const v = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
+  const d = DEFAULT_CRITERIA;
+  return {
+    minProfitJpy: numberOr(v.minProfitJpy, d.minProfitJpy),
+    minMarginPercent: numberOr(v.minMarginPercent, d.minMarginPercent, 1000),
+    minEbayListings: numberOr(v.minEbayListings, d.minEbayListings, 1000),
+    minPriceRatioPercent: numberOr(v.minPriceRatioPercent, d.minPriceRatioPercent, 100),
+    basis: PRICE_BASES.some((b) => b.id === v.basis) ? (v.basis as PriceBasis) : d.basis,
+    minRank: MIN_RANKS.some((r) => r.id === v.minRank) ? (v.minRank as MinRank) : d.minRank,
+    domesticShippingJpy: numberOr(v.domesticShippingJpy, d.domesticShippingJpy),
+  };
+}
+
+/** 1 回に調べるランキングの商品数の上限（eBay の利用回数と処理時間を抑えるため） */
+export const MAX_DISCOVER_ITEMS = 30;

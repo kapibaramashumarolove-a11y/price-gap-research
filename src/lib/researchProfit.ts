@@ -153,6 +153,12 @@ export function evaluateCandidate(
   const count = candidate.ebay?.count ?? 0;
   if (count < criteria.minEbayListings) notes.push(`eBay の比較対象が ${count} 件と少なく、相場が不確かです`);
   if (candidate.ebay?.usedKeywordFallback) notes.push("JAN で見つからず英語キーワードで代用した相場です");
+  const loc = candidate.ebay?.locations;
+  if (loc && loc.other > 0 && loc.jp === 0) {
+    notes.push(
+      `比較した eBay の出品はすべて日本以外（${loc.other} 件）からです。日本から送ると購入者に関税（米国は日本製品に約 15%）がかかるため、同じ値段では売れにくいことがあります`,
+    );
+  }
   const tooCheap = plausible.length === 0;
   if (tooCheap) {
     notes.push(

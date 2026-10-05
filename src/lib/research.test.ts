@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_SETTINGS } from "./profit";
+import { DEFAULT_CRITERIA } from "./researchProfit";
 import type { RawDomesticOffer } from "./domestic";
 import { DomesticApiError } from "./domestic";
 import type { EbayItemSummary } from "./ebay";
-import { clearEbayCache, computeSalesSignal, groupOffers, percentile, runResearch, trimPriceOutliers, type ResearchDeps } from "./research";
+import { clearEbayCache, computeSalesSignal, discoverFromRanking, groupOffers, percentile, runResearch, trimPriceOutliers, type ResearchDeps } from "./research";
 
 function offer(partial: Partial<RawDomesticOffer> & Pick<RawDomesticOffer, "title" | "priceJpy">): RawDomesticOffer {
   return {
@@ -278,5 +280,46 @@ describe("売れ行きの推定", () => {
     );
     expect(getItemSales).toHaveBeenCalledTimes(3);
     expect(res.candidates[0].ebay?.sales).toMatchObject({ checkedListings: 2, multiQuantityListings: 2, soldTotal: 20, estimatedMonthlySales: 15 });
+  });
+});
+
+describe("discoverFromRanking（売れ筋から探す）", () => {
+  const ranked = (rank: number, title: string, priceJpy: number) => ({ ...offer({ source: "rakuten", title, priceJpy }), rank });
+
+  it("型番を取り出して eBay と比べ、型番なし・付属品は除き、同じ型番はまとめ、お宝候補だけ売れ行きを調べる", async () => {
+    const searchEbay = vi.fn(async ({ q }: { q?: string }) => ({
+      total: 10,
+      items:
+        q === "ZV-E10"
+          ? [
+              { ...ebayItem("Sony ZV-E10 body", 600), itemId: "z1" },
+              { ...ebayItem("Sony ZV-E10 Mirrorless body", 650), itemId: "z2" },
+              { ...ebayItem("Sony ZV-E10 camera", 700), itemId: "z3" },
+            ]
+          : [
+              { ...ebayItem("Boss DS-1 pedal", 60), itemId: "b1" },
+              { ...ebayItem("Boss DS-1 distortion", 65), itemId: "b2" },
+              { ...ebayItem("Boss DS-1", 70), itemId: "b3" },
+            ],
+    }));
+    const getItemSales = vi.fn(async () => ({ soldQuantity: 5, totalQuantity: 8 }));
+    const { candidates, stats } = await discoverFromRanking(
+      [
+        ranked(1, "【楽天1位】ソニー VLOGCAM ZV-E10 ボディ 送料無料", 60000),
+        ranked(2, "ソニー ZV-E10 ボディ ブラック", 62000),
+        ranked(3, "【送料無料】国産 うなぎ 蒲焼き 2尾", 4000),
+        ranked(4, "ZV-E10用 液晶保護フィルム", 980),
+        ranked(5, "BOSS DS-1 ディストーション", 8000),
+      ],
+      { settings: DEFAULT_SETTINGS, criteria: DEFAULT_CRITERIA, internationalShippingJpy: 2000 },
+      { searchRakuten: vi.fn(), searchYahoo: vi.fn(), searchEbay, getItemSales, now: () => 0 },
+    );
+    expect(stats).toEqual({ received: 5, noIdentifier: 1, excluded: 1, duplicates: 1, checked: 2, salesChecked: 1 });
+    expect(candidates.map((c) => c.label).sort()).toEqual(["楽天1位・ZV-E10", "楽天5位・DS-1"]);
+    // ZV-E10（eBay $600〜700 に対して 6 万円）はお宝候補なので売れ行きを調べ、DS-1（$60〜70 に対して 8,000 円）は調べない
+    const zv = candidates.find((c) => c.label.includes("ZV-E10"))!;
+    expect(zv.ebay?.sales?.soldTotal).toBeGreaterThan(0);
+    expect(candidates.find((c) => c.label.includes("DS-1"))!.ebay?.sales).toBeUndefined();
+    expect(getItemSales).toHaveBeenCalledTimes(3);
   });
 });

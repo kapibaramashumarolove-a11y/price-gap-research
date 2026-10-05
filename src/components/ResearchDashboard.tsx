@@ -17,7 +17,7 @@ import {
 } from "@/lib/presetCsv";
 import { DEFAULT_SETTINGS, type Settings } from "@/lib/profit";
 import { parseQuickInput, type QuickLine } from "@/lib/quickInput";
-import { fetchRakuten, type RakutenCredentials, type RakutenResult } from "@/lib/rakuten";
+import { fetchRakuten, fetchRakutenRanking, type RakutenCredentials, type RakutenResult, type RankingPeriod } from "@/lib/rakuten";
 import {
   DEFAULT_CRITERIA,
   evaluateCandidate,
@@ -35,6 +35,7 @@ import {
   DEFAULT_PRESETS,
   ITEM_CONDITIONS,
   MAX_LOOKUPS_LIMIT,
+  RANKING_GENRES,
   RESEARCH_KINDS,
   type Candidate,
   type DomesticOffer,
@@ -51,6 +52,13 @@ const CRITERIA_KEY = "price-gap:research-criteria";
 const RESULTS_KEY = "price-gap:research-results";
 const ONLY_TREASURES_KEY = "price-gap:research-only-treasures";
 const GENRE_FILTER_KEY = "price-gap:research-genre";
+const DISCOVER_KEY = "price-gap:discover-options";
+
+type DiscoverOptions = { genreIds: string[]; period: RankingPeriod; pages: number };
+const DEFAULT_DISCOVER: DiscoverOptions = { genreIds: ["100212", "111961", "112493"], period: "realtime", pages: 1 };
+
+/** /api/discover の結果の集計 */
+type DiscoverStats = { received: number; noIdentifier: number; excluded: number; duplicates: number; checked: number; salesChecked: number };
 /** 検索条件の一覧で最初に表示する件数（多いときは「残りを表示」で開く） */
 const PRESET_PREVIEW_COUNT = 5;
 
@@ -195,6 +203,8 @@ export default function ResearchDashboard() {
   const [quickCondition, setQuickCondition] = useState<ItemCondition>("new");
   const [quickGenre, setQuickGenre] = useState("");
   const [quickSave, setQuickSave] = useState(true);
+  const [discover, setDiscover] = useState<DiscoverOptions>(() => ({ ...DEFAULT_DISCOVER, ...loadJson<Partial<DiscoverOptions>>(DISCOVER_KEY) }));
+  const [discoverLog, setDiscoverLog] = useState<string[]>([]);
   const quickLines = useMemo(
     () => parseQuickInput(quickText, { condition: quickCondition, genre: quickGenre }, () => crypto.randomUUID()),
     [quickText, quickCondition, quickGenre],
@@ -207,6 +217,7 @@ export default function ResearchDashboard() {
   useEffect(() => saveJson(RESULTS_KEY, results), [results]);
   useEffect(() => saveJson(ONLY_TREASURES_KEY, onlyTreasures), [onlyTreasures]);
   useEffect(() => saveJson(GENRE_FILTER_KEY, genreFilter), [genreFilter]);
+  useEffect(() => saveJson(DISCOVER_KEY, discover), [discover]);
 
   // ジャンルの一覧と、選んだジャンルの検索条件（ジャンルが消えていたら「すべて」に戻す）
   const genres = useMemo(
@@ -319,6 +330,77 @@ export default function ResearchDashboard() {
   }
 
   /** 直接入力した商品を調べる（保存するなら検索条件に追加・上書きしてから） */
+  /**
+   * 売れ筋から探す。選んだジャンルの楽天ランキングをブラウザから取得し（楽天の「許可されたWebサイト」の確認のため）、
+   * サーバーで型番・JAN を取り出して eBay と比べる。結果はジャンルごとに通常の結果一覧へ入れる
+   */
+  async function handleDiscover() {
+    const genres = RANKING_GENRES.filter((g) => discover.genreIds.includes(g.id));
+    if (genres.length === 0) return;
+    stopRequested.current = false;
+    setDiscoverLog([]);
+    const creds = await loadRakutenCredentials();
+    if (!creds) {
+      setDiscoverLog(["楽天のキー（RAKUTEN_APP_ID・RAKUTEN_ACCESS_KEY）が設定されていないため、ランキングを取得できません。"]);
+      return;
+    }
+    const periodLabel = discover.period === "realtime" ? "リアルタイム" : "デイリー";
+    for (const [index, genre] of genres.entries()) {
+      if (stopRequested.current) break;
+      setRunning({ name: `楽天ランキング ${genre.label}`, index: index + 1, total: genres.length });
+      const candidates: Candidate[] = [];
+      const warnings: string[] = [];
+      const total: DiscoverStats = { received: 0, noIdentifier: 0, excluded: 0, duplicates: 0, checked: 0, salesChecked: 0 };
+      for (let page = 1; page <= discover.pages && !stopRequested.current; page++) {
+        const ranking = await fetchRakutenRanking({ genreId: genre.id, period: discover.period, page }, creds, window.location.origin);
+        if ("error" in ranking) {
+          warnings.push(ranking.error);
+          break;
+        }
+        try {
+          const res = await fetch("/api/discover", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ items: ranking.offers, settings, criteria }),
+          });
+          if (res.status === 401) {
+            window.location.reload();
+            return;
+          }
+          const body = await res.json();
+          if (!res.ok) {
+            warnings.push(body.error ?? `売れ筋の調査に失敗しました（HTTP ${res.status}）。`);
+            break;
+          }
+          candidates.push(...(body.candidates as Candidate[]));
+          for (const k of Object.keys(total) as (keyof DiscoverStats)[]) total[k] += body.stats[k];
+        } catch {
+          warnings.push("サーバーに接続できませんでした。");
+          break;
+        }
+      }
+      const name = `楽天ランキング ${genre.label}（${periodLabel}）`;
+      setDiscoverLog((prev) => [
+        ...prev,
+        `${genre.label}: ${total.received}件 → 型番なし ${total.noIdentifier}・付属品など ${total.excluded}・重複 ${total.duplicates} → eBay ${total.checked}件を調査（お宝候補 ${total.salesChecked}件は売れ行きも調査）`,
+      ]);
+      setResults((prev) => ({
+        ...prev,
+        [`rank-${genre.id}`]: {
+          presetName: name,
+          response: {
+            candidates,
+            skippedLookups: 0,
+            stats: { rakuten: total.received, yahoo: null, excluded: total.excluded, unidentified: total.noIdentifier },
+            warnings,
+            fetchedAt: new Date().toISOString(),
+          },
+        },
+      }));
+    }
+    setRunning(null);
+  }
+
   async function handleQuickRun() {
     if (quickPresets.length === 0) return;
     let targets = quickPresets;
@@ -498,6 +580,14 @@ export default function ResearchDashboard() {
           </p>
         </div>
       </details>
+
+      <DiscoverSection
+        options={discover}
+        onChange={setDiscover}
+        onRun={handleDiscover}
+        log={discoverLog}
+        busy={busy}
+      />
 
       <QuickInput
         text={quickText}
@@ -831,6 +921,91 @@ function PresetEditor({
   );
 }
 
+function DiscoverSection({
+  options,
+  onChange,
+  onRun,
+  log,
+  busy,
+}: {
+  options: DiscoverOptions;
+  onChange: (options: DiscoverOptions) => void;
+  onRun: () => void;
+  log: string[];
+  busy: boolean;
+}) {
+  const toggle = (id: string) =>
+    onChange({
+      ...options,
+      genreIds: options.genreIds.includes(id) ? options.genreIds.filter((g) => g !== id) : [...options.genreIds, id],
+    });
+  return (
+    <section className="space-y-3 rounded-lg border border-black/20 p-4 dark:border-white/25">
+      <h2 className="font-semibold">売れ筋から探す（楽天ランキング）</h2>
+      <p className="text-xs opacity-70">
+        選んだジャンルの楽天ランキングから型番・JAN を自動で取り出し、eBay の相場と比べます。型番を入力する必要はありません。
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {RANKING_GENRES.map((g) => {
+          const on = options.genreIds.includes(g.id);
+          return (
+            <button
+              key={g.id}
+              type="button"
+              aria-pressed={on}
+              onClick={() => toggle(g.id)}
+              className={`min-h-11 rounded-full border px-3 text-sm ${
+                on ? "border-foreground bg-foreground text-background" : "border-black/25 dark:border-white/30"
+              }`}
+            >
+              {g.label}
+            </button>
+          );
+        })}
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="flex min-w-0 flex-col gap-1 text-sm">
+          <span>ランキング</span>
+          <select
+            value={options.period}
+            onChange={(e) => onChange({ ...options, period: e.target.value as RankingPeriod })}
+            className={INPUT_CLASS}
+          >
+            <option value="realtime">リアルタイム</option>
+            <option value="daily">デイリー</option>
+          </select>
+        </label>
+        <label className="flex min-w-0 flex-col gap-1 text-sm">
+          <span>調べる順位</span>
+          <select value={options.pages} onChange={(e) => onChange({ ...options, pages: Number(e.target.value) })} className={INPUT_CLASS}>
+            <option value={1}>上位 30 位</option>
+            <option value={2}>上位 60 位</option>
+            <option value={3}>上位 90 位</option>
+          </select>
+        </label>
+      </div>
+      <button
+        type="button"
+        onClick={onRun}
+        disabled={busy || options.genreIds.length === 0}
+        className="min-h-12 w-full rounded-lg bg-foreground px-6 text-base font-medium text-background active:opacity-80 disabled:opacity-50 sm:w-auto"
+      >
+        ランキングから探す（{options.genreIds.length} ジャンル）
+      </button>
+      <p className="text-xs opacity-60">
+        1 ジャンル（30 位まで）につき 20〜40 秒ほどかかります。eBay の利用回数を抑えるため、売れ行き（回転率）はお宝候補だけ調べます。
+      </p>
+      {log.length > 0 && (
+        <ul className="space-y-0.5 text-xs opacity-80">
+          {log.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function QuickInput({
   text,
   onTextChange,
@@ -1127,6 +1302,7 @@ function CandidateCard({ row, criteria }: { row: Row; criteria: TreasureCriteria
           {usd.format(evaluation.ebayPriceUsd)}
           <span className="block text-xs opacity-60">
             {BASIS_SHORT[evaluation.usedBasis]}・比較 {ebay.count}件（ヒット {ebay.total}件）
+            {ebay.locations && ` ・ 発送元 日本 ${ebay.locations.jp}件／海外 ${ebay.locations.other}件`}
           </span>
         </dd>
         <dt className="opacity-70">売れ行き</dt>

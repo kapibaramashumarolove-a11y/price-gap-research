@@ -19,6 +19,7 @@ import {
   containsAllTokens,
   ebayWebSearchUrl,
   extractJan,
+  extractModelKeyword,
   identify,
   isExcludedOffer,
   keywordTokens,
@@ -28,6 +29,8 @@ import {
   type EbaySearchPlan,
   type Identity,
 } from "./identify";
+import type { Settings } from "./profit";
+import { evaluateCandidate, type TreasureCriteria } from "./researchProfit";
 import {
   DEFAULT_MAX_LOOKUPS,
   ITEM_CONDITIONS,
@@ -199,6 +202,10 @@ async function lookUpEbay(
       samples,
       activeUrl: ebayWebSearchUrl(plan.webQuery, false),
       soldUrl: ebayWebSearchUrl(plan.webQuery, true),
+      locations: {
+        jp: matched.filter((i) => i.itemLocation?.country === "JP").length,
+        other: matched.filter((i) => i.itemLocation?.country && i.itemLocation.country !== "JP").length,
+      },
     };
     return { market, matched };
   };
@@ -342,10 +349,15 @@ export function matchItemOffers(
  * @returns 相場、または調べられなかった理由
  */
 export async function lookUpItemMarket(
-  request: Pick<ResearchRequest, "jan" | "ebayKeyword" | "condition">,
+  request: Pick<ResearchRequest, "jan" | "ebayKeyword" | "condition"> & { keyword?: string },
   deps: ResearchDeps = defaultResearchDeps,
 ): Promise<EbayMarket | string> {
-  const plans = planItemEbaySearch({ jan: request.jan, ebayKeyword: request.ebayKeyword, condition: request.condition ?? "new" });
+  const plans = planItemEbaySearch({
+    jan: request.jan,
+    ebayKeyword: request.ebayKeyword,
+    condition: request.condition ?? "new",
+    variantReference: request.keyword,
+  });
   return plans ? lookUpEbay(plans.primary, plans.fallback, deps) : "eBay 用の英語キーワードか JAN を設定してください。";
 }
 
@@ -440,4 +452,75 @@ export async function runResearch(
   });
 
   return response(candidates, excluded, unidentified, groups.length - targets.length);
+}
+
+// ---- 売れ筋から探す（楽天ランキング）----
+
+export type DiscoverStats = {
+  /** 受け取ったランキングの商品数 */
+  received: number;
+  /** JAN も型番も見つからなかった商品数 */
+  noIdentifier: number;
+  /** 付属品・ジャンクなどで除いた商品数 */
+  excluded: number;
+  /** 同じ型番・JAN がランキングに複数あってまとめた数 */
+  duplicates: number;
+  /** eBay の相場を調べた商品数 */
+  checked: number;
+  /** お宝候補として売れ行き（回転率）まで調べた商品数 */
+  salesChecked: number;
+};
+
+/**
+ * ランキングの商品から JAN・型番を取り出して eBay の相場を調べ、利益を計算する。
+ * eBay の利用回数を抑えるため、売れ行き（出品ごとの販売数）は、利益の条件を満たした商品だけ調べる。
+ */
+export async function discoverFromRanking(
+  items: (RawDomesticOffer & { rank: number })[],
+  options: { settings: Settings; criteria: TreasureCriteria; internationalShippingJpy?: number },
+  deps: ResearchDeps = defaultResearchDeps,
+): Promise<{ candidates: Candidate[]; stats: DiscoverStats }> {
+  const stats: DiscoverStats = { received: items.length, noIdentifier: 0, excluded: 0, duplicates: 0, checked: 0, salesChecked: 0 };
+  const byKey = new Map<string, { item: (typeof items)[number]; jan?: string; model?: string }>();
+  for (const item of items) {
+    if (isExcludedOffer("item", item.title, [])) {
+      stats.excluded++;
+      continue;
+    }
+    const jan = item.jan ?? extractJan(item.searchText);
+    const model = extractModelKeyword(item.title);
+    if (!jan && !model) {
+      stats.noIdentifier++;
+      continue;
+    }
+    const key = jan ? `jan:${jan}` : `model:${model!.toUpperCase()}`;
+    const prev = byKey.get(key);
+    if (prev) stats.duplicates++;
+    if (!prev || item.priceJpy < prev.item.priceJpy) byKey.set(key, { item, jan, model });
+  }
+
+  const withoutSales: ResearchDeps = { ...deps, getItemSales: undefined };
+  // 売れ行きを調べる前に、回転率ランクの条件を除いて利益だけで候補を選ぶ
+  const profitOnly = { ...options.criteria, minRank: "none" as const };
+  const candidates = await mapWithConcurrency([...byKey.entries()], EBAY_CONCURRENCY, async ([key, { item, jan, model }]) => {
+    const plans = planItemEbaySearch({ jan, ebayKeyword: model, condition: "new", variantReference: item.title });
+    const label = `楽天${item.rank}位・${jan ? `JAN ${jan}` : model}`;
+    const candidate = (market: EbayMarket | string): Candidate => ({
+      key: `rank:${key}`,
+      label,
+      kind: "item",
+      offers: toPublicOffers([item]),
+      ...(typeof market === "string" ? { ebay: null, ebayError: market } : { ebay: market }),
+    });
+    if (!plans) return candidate("eBay で検索するための型番・JAN がありません。");
+    stats.checked++;
+    const market = await lookUpEbay(plans.primary, plans.fallback, withoutSales);
+    const first = candidate(market);
+    const evaluation = evaluateCandidate(first, options.settings, profitOnly, options.internationalShippingJpy);
+    if (!evaluation?.isTreasure || !deps.getItemSales) return first;
+    // お宝候補だけ売れ行きを調べる（検索結果は使い回すので、追加は出品の詳細だけ）
+    stats.salesChecked++;
+    return candidate(await lookUpEbay(plans.primary, plans.fallback, deps));
+  });
+  return { candidates, stats };
 }

@@ -143,3 +143,12 @@ describe("回転率ランクと売れている出品の価格", () => {
     expect(evaluateCandidate(candidate(), DEFAULT_SETTINGS, strict, 2000)!.isTreasure).toBe(false);
   });
 });
+
+describe("比較した出品の発送元", () => {
+  it("すべて日本以外からなら、関税で同じ値段では売れにくいことを知らせる", () => {
+    const allAbroad = evaluateCandidate(candidate({ ebay: { ...market, locations: { jp: 0, other: 10 } } }), DEFAULT_SETTINGS, DEFAULT_CRITERIA, 2000)!;
+    expect(allAbroad.notes.join()).toMatch(/すべて日本以外（10 件）/);
+    const someJapan = evaluateCandidate(candidate({ ebay: { ...market, locations: { jp: 3, other: 7 } } }), DEFAULT_SETTINGS, DEFAULT_CRITERIA, 2000)!;
+    expect(someJapan.notes.join()).not.toMatch(/日本以外/);
+  });
+});

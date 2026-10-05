@@ -17,6 +17,8 @@ export type EbayItemSummary = {
   price?: { value?: string; currency?: string };
   buyingOptions?: string[];
   itemWebUrl?: string;
+  /** 発送元（country は ISO の国コード。例: JP・US） */
+  itemLocation?: { country?: string };
   /** 出品が最初に始まった日時（再出品されても変わらない） */
   itemOriginDate?: string;
   itemCreationDate?: string;

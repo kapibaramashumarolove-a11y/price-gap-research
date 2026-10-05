@@ -4,6 +4,7 @@ import {
   ebayWebSearchUrl,
   extractCardNumber,
   extractJan,
+  extractModelKeyword,
   extractModelNumber,
   identify,
   isAccessoryTitle,
@@ -12,6 +13,7 @@ import {
   isValidJan,
   normalizeText,
   planEbaySearch,
+  variantFilter,
 } from "./identify";
 
 describe("normalizeText", () => {
@@ -221,5 +223,48 @@ describe("セット・まとめ売りの除外（eBay の実際の出品タイ�
   it("カード番号の種類を数える", () => {
     expect(countCardNumbers("213/172 215/172 218/172")).toBe(3);
     expect(countCardNumbers("#215/172 Suicune 215 / 172")).toBe(1);
+  });
+});
+
+describe("extractModelKeyword（楽天の商品名から型番を取り出す）", () => {
+  it("宣伝文句・サイズ・年などを除いて型番を取り出す", () => {
+    expect(extractModelKeyword("【楽天1位】ソニー VLOGCAM ZV-E10 ボディ ミラーレス一眼 送料無料")).toBe("ZV-E10");
+    expect(extractModelKeyword("シマノ 22 ステラ C3000XG スピニングリール 2022年モデル")).toBe("C3000XG");
+    expect(extractModelKeyword("BOSS DS-1 ディストーション エフェクター")).toBe("DS-1");
+    expect(extractModelKeyword("【P10倍】Nintendo Switch 有機ELモデル HEG-S-KAAAA 64GB")).toBe("HEG-S-KAAAA");
+    expect(extractModelKeyword("Canon EOS R50 ダブルズームキット 4K USB-C 2023")).toBe("R50");
+  });
+
+  it("型番がなければ undefined", () => {
+    expect(extractModelKeyword("【送料無料】国産 うなぎ 蒲焼き 2尾 200g")).toBeUndefined();
+    expect(extractModelKeyword("ポケモンカード 151 BOX 未開封")).toBeUndefined();
+  });
+});
+
+describe("variantFilter（型番の違い・ボディとキットの違いを揃える。eBay の実際の出品タイトルより）", () => {
+  it("国内がボディなら、eBay のレンズキット・別型番（ZV-E10L）・新世代（II）を除く", () => {
+    const f = variantFilter("ZV-E10", "【楽天1位】ソニー VLOGCAM ZV-E10 ボディ ブラック");
+    expect(f("Sony Alpha ZV-E10 24.2MP Mirrorless Vlog Camera Body Only")).toBe(true);
+    expect(f("Sony ZVE10 Mirrorless Camera Black")).toBe(true);
+    expect(f("Sony ZV-E10 Camera with 16-50mm Lens Kit")).toBe(false);
+    expect(f("Sony ZV-E10L Vlog camera black")).toBe(false);
+    expect(f("Sony ZV-E10 II Mirrorless Camera Body")).toBe(false);
+    expect(f("Sony ZV-E10 Mark II body")).toBe(false);
+  });
+
+  it("国内がキットなら、eBay もキット・レンズ付きだけ", () => {
+    const f = variantFilter("R50", "キヤノン EOS R50 ダブルズームキット ブラック");
+    expect(f("Canon EOS R50 Mirrorless Camera Double Zoom Kit RF-S 18-45mm 55-210mm")).toBe(true);
+    expect(f("Canon EOS R50 Body Only Black")).toBe(false);
+  });
+
+  it("国内が新世代なら、eBay も同じ世代だけ", () => {
+    const f = variantFilter("ZV-E10", "ソニー ZV-E10 II ボディ");
+    expect(f("Sony ZV-E10 II body")).toBe(true);
+    expect(f("Sony ZV-E10 body")).toBe(false);
+  });
+
+  it("型番が分からなければ型番の条件は付けない", () => {
+    expect(variantFilter(undefined, "シマノ ステラ")("Shimano Stella C3000XG")).toBe(true);
   });
 });
