@@ -218,7 +218,18 @@ const EBAY_COMMON_EXCLUDE = /\b(custom|proxy|fan ?art|replica|reprint|orica|meta
 const EBAY_OTHER_LANGUAGE = /\b(korean|chinese|s-chinese|t-chinese|indonesian|thai|english)\b/i;
 const EBAY_SEALED_EXCLUDE =
   /\bx\s?[2-9]\d*\b|\b[2-9]\d*\s?x\b|\b[2-9]\d*\s?(boxes|box lot|bx)\b|\bcase\b|\bempty\b|\b1\s?pack\b|\bsingle pack\b|\bpack only\b|\bbundle\b|\blot\b/i;
-const EBAY_SET_EXCLUDE = /\blot\b|full set|complete set|god pack|\bbundle\b/i;
+/**
+ * 複数枚のセット・まとめ売り・選べる出品（例: "SET 3 PSA 10 ... 213/172 215/172 218/172"）。
+ * 1 枚の相場ではないのに売れた数が多く、売れている出品の価格を大きく引き上げてしまうので除く
+ */
+const EBAY_SET_EXCLUDE =
+  /\blot\b|\bset\b|full set|complete set|sequential|\bseq\b|god pack|\bbundle\b|\bpick\b|\bchoose\b|\bselect\b|\bx\s?[2-9]\b|\b[2-9]\s?x\b|\b[2-9]\s?(cards|pcs)\b/i;
+
+/** タイトルに含まれるカード番号（例: 215/172）の種類の数。2 つ以上ならセットの出品 */
+export function countCardNumbers(title: string): number {
+  const numbers = normalizeText(title).match(/(?<![\d/])\d{1,3}\s*\/\s*\d{2,3}(?![\d/])/g) ?? [];
+  return new Set(numbers.map((n) => n.replace(/\s/g, ""))).size;
+}
 
 function containsCardNumber(title: string, cardNumber: string): boolean {
   const [num, den] = cardNumber.split("/");
@@ -257,6 +268,7 @@ export function planEbaySearch(kind: ResearchKind, identity: Identity): EbaySear
           /PSA\s*10(?!\d)/i.test(t) &&
           !/\b(BGS|CGC|ARS)\b/i.test(t) &&
           !EBAY_SET_EXCLUDE.test(t) &&
+          countCardNumbers(t) <= 1 &&
           !EBAY_COMMON_EXCLUDE.test(t) &&
           !EBAY_OTHER_LANGUAGE.test(t),
       };
@@ -273,6 +285,7 @@ export function planEbaySearch(kind: ResearchKind, identity: Identity): EbaySear
           containsCardNumber(t, num) &&
           !/\b(PSA|BGS|CGC|ARS|graded|slab)\b/i.test(t) &&
           !EBAY_SET_EXCLUDE.test(t) &&
+          countCardNumbers(t) <= 1 &&
           !EBAY_COMMON_EXCLUDE.test(t) &&
           !EBAY_OTHER_LANGUAGE.test(t),
       };
@@ -328,7 +341,7 @@ export function itemConditionIds(condition: ItemCondition): string[] {
 
 /** 部品取り・動作不良・箱や説明書だけ・まとめ売りなど、本体 1 台の相場にならない出品 */
 const EBAY_ITEM_EXCLUDE =
-  /\bfor parts\b|\bnot working\b|\bjunk\b|\bbroken\b|\bas[- ]is\b|\b(box|case|manual|cover) only\b|\bempty box\b|\blot\b|\bbundle\b|\breplica\b/i;
+  /\bfor parts\b|\bnot working\b|\bjunk\b|\bbroken\b|\bas[- ]is\b|\b(box|case|manual|cover) only\b|\bempty box\b|\blot\b|\bbundle\b|\breplica\b|\bset of\b|\b[2-9]\s?(pcs|pieces|units)\b|\bx\s?[2-9]\b/i;
 /** 本体ではなく部品・付属品の出品によく出る言葉 */
 const EBAY_ACCESSORY =
   /\b(drag washers?|washers?|screws?|knobs?|part no|parts only|replacement|repair parts?|power supply|ac adapter|adapter|cables?|decals?|stickers?|screen protector|protector|tempered glass|skins?|cage|silicone|compatible with)\b/i;

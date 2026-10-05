@@ -46,6 +46,44 @@ type RakutenItem = {
   mediumImageUrls?: (string | { imageUrl?: string })[];
 };
 
+// ---- 検索キーワードの整形 ----
+// 楽天の検索キーワードの決まり（守らないと「keyword is not valid」になる）:
+//   - 単語は半角スペース区切り（AND 検索）
+//   - 1 つの単語は半角 2 文字以上（全角の漢字などは 1 文字以上、ひらがな・カタカナ・記号は 2 文字以上）
+//   - 全体で半角 128 文字まで（全角は 2 文字として数える）
+
+const RAKUTEN_KEYWORD_MAX_WIDTH = 128;
+
+/** 半角は 1、全角は 2 として幅を数える */
+function charWidth(ch: string): number {
+  return /[\u0020-\u007e\uff61-\uff9f]/.test(ch) ? 1 : 2;
+}
+
+/** 1 文字の単語のうち、楽天で使えるもの（ひらがな・カタカナ・記号・半角以外の全角文字＝漢字など） */
+function isValidSingleChar(ch: string): boolean {
+  return charWidth(ch) === 2 && !/[\u3040-\u30ff\u3000-\u303f\uff01-\uff60]/.test(ch);
+}
+
+/**
+ * 楽天の決まりに合うように検索キーワードを整える。全角の英数字・スペースは半角にし、
+ * 楽天で使えない 1 文字の単語（例: "Nikon F3 W" の "W"）を除き、長すぎるときは後ろの単語から削る。
+ * @returns 使える単語が残らなければ空文字
+ */
+export function rakutenKeyword(raw: string): string {
+  const words = normalizeText(raw)
+    .split(" ")
+    .filter((w) => [...w].length >= 2 || isValidSingleChar(w));
+  const kept: string[] = [];
+  let width = 0;
+  for (const w of words) {
+    const add = [...w].reduce((sum, ch) => sum + charWidth(ch), 0) + (kept.length > 0 ? 1 : 0);
+    if (width + add > RAKUTEN_KEYWORD_MAX_WIDTH) break;
+    kept.push(w);
+    width += add;
+  }
+  return kept.join(" ");
+}
+
 /** 検索 URL を作る。アクセスキーは URL に載せず、ヘッダー（accessKey）で送ること */
 export function buildRakutenSearchUrl(params: RakutenSearchParams, creds: Pick<RakutenCredentials, "appId" | "affiliateId">): URL {
   const url = new URL(RAKUTEN_URL);
@@ -53,7 +91,7 @@ export function buildRakutenSearchUrl(params: RakutenSearchParams, creds: Pick<R
   if (creds.affiliateId) url.searchParams.set("affiliateId", creds.affiliateId);
   url.searchParams.set("format", "json");
   url.searchParams.set("formatVersion", "2");
-  url.searchParams.set("keyword", params.keyword || params.jan || "");
+  url.searchParams.set("keyword", rakutenKeyword(params.keyword || params.jan || ""));
   url.searchParams.set("hits", String(RAKUTEN_HITS));
   url.searchParams.set("availability", "1");
   url.searchParams.set("imageFlag", "1");
@@ -118,6 +156,9 @@ export async function fetchRakuten(
   fetchFn: typeof fetch = fetch,
   headers: Record<string, string> = {},
 ): Promise<RakutenResult> {
+  if (rakutenKeyword(params.keyword || params.jan || "") === "") {
+    return { error: "楽天: 検索キーワードに楽天で使える単語がありません（1 文字だけの単語は楽天では検索できません）。キーワードを変えてください。" };
+  }
   let res: Response;
   try {
     res = await fetchFn(buildRakutenSearchUrl(params, creds), {

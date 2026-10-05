@@ -121,9 +121,14 @@ describe("回転率ランクと売れている出品の価格", () => {
     expect(turnoverRank(undefined)).toBe("unknown");
   });
 
-  it("売れている出品の価格を売価に使い、なければ安い方から25%で代用して知らせる", () => {
-    const withSales = evaluateCandidate(candidate({ ebay: { ...market, sales: sales({}) } }), DEFAULT_SETTINGS, DEFAULT_CRITERIA, 2000)!;
-    expect(withSales).toMatchObject({ ebayPriceUsd: 550, usedBasis: "sold", rank: "A" });
+  it("売れている出品の価格と安い方から25%の低い方を売価に使い（安全側）、売れた実績がなければ知らせる", () => {
+    // 売れている価格 $450 < 安い方から25% $500 → $450
+    const lower = evaluateCandidate(candidate({ ebay: { ...market, sales: sales({ soldPriceMedianUsd: 450 }) } }), DEFAULT_SETTINGS, DEFAULT_CRITERIA, 2000)!;
+    expect(lower).toMatchObject({ ebayPriceUsd: 450, usedBasis: "sold", rank: "A" });
+    // 売れている価格 $550（セット出品などで高く出た）> $500 → $500
+    const higher = evaluateCandidate(candidate({ ebay: { ...market, sales: sales({}) } }), DEFAULT_SETTINGS, DEFAULT_CRITERIA, 2000)!;
+    expect(higher).toMatchObject({ ebayPriceUsd: 500, usedBasis: "p25" });
+    expect(higher.notes.join()).not.toMatch(/売れた実績のある出品が見つからず/);
 
     const without = evaluateCandidate(candidate(), DEFAULT_SETTINGS, DEFAULT_CRITERIA, 2000)!;
     expect(without).toMatchObject({ ebayPriceUsd: 500, usedBasis: "p25", rank: "unknown" });

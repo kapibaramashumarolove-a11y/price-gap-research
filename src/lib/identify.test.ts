@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  countCardNumbers,
   ebayWebSearchUrl,
   extractCardNumber,
   extractJan,
@@ -189,5 +190,36 @@ describe("isAccessoryTitle（付属品・アクセサリーの出品）", () => 
     expect(isExcludedOffer("item", "ZV-E10用 ケース")).toBe(true);
     expect(isExcludedOffer("other", "ZV-E10用 ケース")).toBe(true);
     expect(isExcludedOffer("single", "ピカチュウ AR 205/172 ケース入り")).toBe(false);
+  });
+});
+
+describe("セット・まとめ売りの除外（eBay の実際の出品タイトルより）", () => {
+  const plan = planEbaySearch("psa10", { key: "psa10:215/172", label: "", cardNumber: "215/172" })!;
+
+  it("複数枚のセットは 1 枚の相場に入れない", () => {
+    for (const title of [
+      "SET 3 PSA 10 Japanese Pokemon 213/172 215/172 218/172 RAIKOU SUICUNE ENTEI S12a",
+      "PSA 10 Entei Suicune Raikou V SAR 213 215 218 set VSTAR Universe s12a Pokemon",
+      "PSA 10 Sequential Set Raikou Entei Suicune V SAR VSTAR Universe Japanese 215/172",
+      "Suicune V 215/172 PSA 10 x3",
+      "Pick your card PSA 10 Japanese 215/172",
+    ]) {
+      expect(plan.titleFilter(title), title).toBe(false);
+    }
+  });
+
+  it("1 枚の出品は残す", () => {
+    for (const title of [
+      "PSA 10 Suicune V SAR 215/172 s12a VSTAR Universe Pokemon Card Game TCG Japanese",
+      "Suicune V 215/172 Pokemon Vstar Universe Japanese SAR - PSA 10",
+      "PSA 10 GEM MINT Pokemon Suicune V VSTAR Universe Full Art 215/172 Japanese",
+    ]) {
+      expect(plan.titleFilter(title), title).toBe(true);
+    }
+  });
+
+  it("カード番号の種類を数える", () => {
+    expect(countCardNumbers("213/172 215/172 218/172")).toBe(3);
+    expect(countCardNumbers("#215/172 Suicune 215 / 172")).toBe(1);
   });
 });

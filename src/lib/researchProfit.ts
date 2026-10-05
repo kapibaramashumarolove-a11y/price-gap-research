@@ -9,7 +9,7 @@ import type { Candidate, DomesticOffer, SalesSignal } from "./researchTypes";
 export type PriceBasis = "sold" | "p25" | "median" | "min";
 
 export const PRICE_BASES: { id: PriceBasis; label: string }[] = [
-  { id: "sold", label: "売れている出品の価格（実売に近い・なければ安い方から25%）" },
+  { id: "sold", label: "売れている価格（安全側・おすすめ）" },
   { id: "p25", label: "安い方から25%" },
   { id: "median", label: "中央値" },
   { id: "min", label: "最安値" },
@@ -103,8 +103,11 @@ function basisPrice(candidate: Candidate, basis: PriceBasis): { price: number | 
   const m = candidate.ebay;
   if (!m) return { price: null, usedBasis: basis };
   if (basis === "sold") {
+    // 売れている出品の価格は少数の出品から出すので、ぶれることがある。
+    // 利益を大きく見積もらないよう、出品中の安い方から 25% と比べて低い方を使う（安全側）
     const sold = m.sales?.soldPriceMedianUsd ?? null;
-    return sold !== null ? { price: sold, usedBasis: "sold" } : { price: m.p25Usd, usedBasis: "p25" };
+    if (sold === null) return { price: m.p25Usd, usedBasis: "p25" };
+    return m.p25Usd !== null && m.p25Usd < sold ? { price: m.p25Usd, usedBasis: "p25" } : { price: sold, usedBasis: "sold" };
   }
   return { price: basis === "p25" ? m.p25Usd : basis === "median" ? m.medianUsd : m.minUsd, usedBasis: basis };
 }
@@ -159,7 +162,7 @@ export function evaluateCandidate(
     notes.push(`eBay 相場の ${criteria.minPriceRatioPercent}% 未満の安すぎる国内商品 ${suspiciousCount} 件は、付属品の可能性があるため除きました`);
   }
 
-  if (criteria.basis === "sold" && usedBasis !== "sold") {
+  if (criteria.basis === "sold" && usedBasis !== "sold" && candidate.ebay?.sales?.soldPriceMedianUsd == null) {
     notes.push("売れた実績のある出品が見つからず、出品中価格（安い方から25%）で計算しています");
   }
   if (!meetsMinRank(rank, criteria.minRank)) {

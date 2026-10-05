@@ -394,7 +394,12 @@ export default function ResearchDashboard() {
   }
 
   const busy = running !== null;
-  const allWarnings = [...new Set(Object.values(results).flatMap((r) => r.response.warnings))];
+  // 同じ注意はまとめて、どの検索条件で出たかを添える
+  const allWarnings = [
+    ...Object.values(results)
+      .flatMap((r) => r.response.warnings.map((w) => [w, r.presetName] as const))
+      .reduce((map, [w, name]) => map.set(w, [...(map.get(w) ?? []), name]), new Map<string, string[]>()),
+  ];
 
   return (
     <main className="mx-auto w-full max-w-5xl space-y-6 px-4 pt-2 pb-[calc(2rem+env(safe-area-inset-bottom))] sm:pt-4">
@@ -655,8 +660,11 @@ export default function ResearchDashboard() {
 
       {allWarnings.length > 0 && (
         <ul className="space-y-1 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
-          {allWarnings.map((w) => (
-            <li key={w}>⚠ {w}</li>
+          {allWarnings.map(([w, names]) => (
+            <li key={w}>
+              ⚠ {w}
+              <span className="block text-xs opacity-70">対象の検索条件: {names.join("、")}</span>
+            </li>
           ))}
         </ul>
       )}

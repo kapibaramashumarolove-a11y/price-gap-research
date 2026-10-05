@@ -155,3 +155,34 @@ describe("parseClientRakuten（ブラウザで検索した楽天の結果の検�
     });
   });
 });
+
+describe("rakutenKeyword（楽天の検索キーワードの決まりに合わせる）", () => {
+  it("1 文字の英字・かな・記号を除き、漢字 1 文字は残す", async () => {
+    const { rakutenKeyword } = await import("./rakuten");
+    expect(rakutenKeyword("Nikon F3 W")).toBe("Nikon F3");
+    expect(rakutenKeyword("ゼルダ の 伝説 箱")).toBe("ゼルダ 伝説 箱");
+    expect(rakutenKeyword("ポケカ / PSA10")).toBe("ポケカ PSA10");
+  });
+
+  it("全角の英数字・スペースを半角にする", async () => {
+    const { rakutenKeyword } = await import("./rakuten");
+    expect(rakutenKeyword("ＢＯＳＳ　ＤＳ－１")).toBe("BOSS DS-1");
+  });
+
+  it("半角 128 文字（全角は 2 文字）を超える分は後ろの単語から削る", async () => {
+    const { rakutenKeyword } = await import("./rakuten");
+    const long = Array.from({ length: 30 }, (_, i) => `ポケモン${i}`).join(" ");
+    const kw = rakutenKeyword(long);
+    const width = [...kw].reduce((sum, ch) => sum + (/[ -~]/.test(ch) ? 1 : 2), 0);
+    expect(width).toBeLessThanOrEqual(128);
+    expect(kw.startsWith("ポケモン0 ポケモン1")).toBe(true);
+  });
+
+  it("使える単語がなければ楽天を呼ばずにエラー", async () => {
+    const { fetchRakuten } = await import("./rakuten");
+    const fetchFn = vi.fn<typeof fetch>();
+    const result = await fetchRakuten({ kind: "item", keyword: "A の" }, { appId: "a", accessKey: "k" }, undefined, fetchFn);
+    expect(result).toMatchObject({ error: expect.stringMatching(/1 文字だけの単語/) });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
