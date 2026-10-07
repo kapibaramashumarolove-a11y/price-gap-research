@@ -42,6 +42,13 @@ export type AmazonProduct = {
   /** 売れ筋ランキング（小さいほど売れている）と、そのカテゴリ名 */
   salesRank?: number;
   salesRankCategory?: string;
+  /** 売れ筋ランキングが上がった回数＝販売回数の目安（Keepa。30 日・90 日） */
+  salesRankDrops30?: number;
+  salesRankDrops90?: number;
+  /** Amazon が表示している「過去 1 か月で ◯ 点以上購入」（Keepa） */
+  monthlySold?: number;
+  /** Amazon 本体が販売しているか（Keepa） */
+  amazonSelling?: boolean;
   /** カートを取っている価格（送料込み）[円] */
   buyBoxPriceJpy?: number;
   /** FBA の新品の最安値（送料込み）[円] */
@@ -131,9 +138,9 @@ export const MIN_RANKS: { id: MinRank; label: string }[] = [
 ];
 
 export const RANK_INFO: Record<TurnoverRank, { label: string; hint: string }> = {
-  S: { label: "S", hint: "即売れ（Amazon ランキング 5,000 位以内）" },
-  A: { label: "A", hint: "高回転（Amazon ランキング 3 万位以内）" },
-  B: { label: "B", hint: "中回転（Amazon ランキング 10 万位以内）" },
-  C: { label: "C", hint: "低回転（Amazon ランキング 10 万位より下）" },
+  S: { label: "S", hint: "即売れ（月 20 回以上売れている。販売回数が分からなければランキング 5,000 位以内）" },
+  A: { label: "A", hint: "高回転（月 8 回以上。またはランキング 3 万位以内）" },
+  B: { label: "B", hint: "中回転（月 2 回以上。またはランキング 10 万位以内）" },
+  C: { label: "C", hint: "低回転（月 2 回未満。またはランキング 10 万位より下）" },
   unknown: { label: "?", hint: "回転率が分からない（Amazon 以外で販売、またはランキングなし）" },
 };

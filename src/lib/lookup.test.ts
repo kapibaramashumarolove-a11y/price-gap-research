@@ -83,7 +83,7 @@ describe("lookupJan", () => {
     expect(result.title).toBe("スイッチ 本体");
     // 画面に返す出品には検索用の文章を含めない
     expect(result.offers.rakuten[0]).not.toHaveProperty("searchText");
-    expect(result.warnings).toEqual([expect.stringMatching(/^Amazon: SP-API のキー/)]);
+    expect(result.warnings).toEqual([expect.stringMatching(/^Amazon: KEEPA_API_KEY/)]);
     expect(result.fetchedAt).toBe("2026-10-07T00:00:00.000Z");
   });
 

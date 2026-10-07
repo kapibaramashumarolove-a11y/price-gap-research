@@ -5,7 +5,7 @@
 // JAN の一覧・計算の前提・最後の結果はブラウザの localStorage に保存する。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { analyzeJan, type Analysis, type Route } from "@/lib/arbitrage";
+import { analyzeJan, monthlySalesEstimate, type Analysis, type Route } from "@/lib/arbitrage";
 import { loadJson, saveJson } from "@/lib/browserStorage";
 import { containsJan, extractJans, normalizeJan } from "@/lib/jan";
 import { decodeCsvBytes, janListToCsv, mergeJanItems, parseJanList, type JanItem, type JanListParseResult } from "@/lib/janList";
@@ -292,7 +292,7 @@ export default function ArbitrageDashboard() {
               </button>
             )}
             <p className="text-xs opacity-60">
-              Amazon の価格 API は 2 秒に 1 回までのため、1 件あたり 3〜5 秒かかります。画面を開いたままにしてください。
+              1 件ずつ順番に調べます（Keepa はトークンを 1 件あたり 1 つ使います）。画面を開いたままにしてください。
             </p>
           </>
         )}
@@ -651,7 +651,7 @@ function SettingsPanel({ settings, onChange }: { settings: ArbitrageSettings; on
             <NumberSetting label="利益（円以上）" value={settings.minProfitJpy} onCommit={(n) => set({ minProfitJpy: n })} />
             <NumberSetting label="利益率（%以上）" value={settings.minMarginPercent} onCommit={(n) => set({ minMarginPercent: n })} />
             <label className="col-span-2 flex min-w-0 flex-col gap-1 text-sm lg:col-span-1">
-              <span>回転率（Amazon ランキングから）</span>
+              <span>回転率（Amazon の月の販売回数）</span>
               <select value={settings.minRank} onChange={(e) => set({ minRank: e.target.value as MinRank })} className={INPUT_CLASS}>
                 {MIN_RANKS.map((r) => (
                   <option key={r.id} value={r.id}>
@@ -873,6 +873,7 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
                       在庫あり {m === "amazon" ? (amazon?.offerCount ?? offers.length) : offers.length}件
                       {m === "amazon" && amazon?.lowestFbaPriceJpy !== undefined && ` ・ FBA 最安 ${yen.format(amazon.lowestFbaPriceJpy)}`}
                       {m === "amazon" && amazon?.salesRank !== undefined && ` ・ ${amazon.salesRankCategory ?? ""} ${amazon.salesRank.toLocaleString()}位`}
+                      {m === "amazon" && monthlySalesEstimate(amazon) !== undefined && ` ・ 月 ${monthlySalesEstimate(amazon)} 回販売`}
                     </span>
                   </>
                 )}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeJan, bestBuyOption, sellFees, sellPriceOn, turnoverRankFromSalesRank } from "./arbitrage";
+import { amazonTurnoverRank, analyzeJan, bestBuyOption, sellFees, sellPriceOn, turnoverRankFromSalesRank } from "./arbitrage";
 import { DEFAULT_ARBITRAGE_SETTINGS, type ArbitrageSettings, type JanLookup, type MallOffer } from "./malls";
 
 function offer(o: Partial<MallOffer> & Pick<MallOffer, "mall" | "priceJpy">): MallOffer {
@@ -76,6 +76,17 @@ describe("turnoverRankFromSalesRank", () => {
     expect(turnoverRankFromSalesRank(80000)).toBe("B");
     expect(turnoverRankFromSalesRank(500000)).toBe("C");
     expect(turnoverRankFromSalesRank(undefined)).toBe("unknown");
+  });
+});
+
+describe("amazonTurnoverRank", () => {
+  it("月の販売回数（Keepa のランキング上昇回数・Amazon の購入数の大きい方）があればそれで決める", () => {
+    const p = { asin: "B0", title: "x", url: "", salesRank: 500 };
+    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 25 })).toBe("S");
+    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 3, monthlySold: 10 })).toBe("A");
+    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 1 })).toBe("C");
+    expect(amazonTurnoverRank(p)).toBe("S");
+    expect(amazonTurnoverRank(undefined)).toBe("unknown");
   });
 });
 

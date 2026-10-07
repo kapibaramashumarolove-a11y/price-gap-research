@@ -5,10 +5,11 @@
 //   利益率       = 利益 ÷ 販売価格
 //
 // 販売価格は、販売先のモールで今売られている最安値（Amazon は FBA の最安値 → カート価格 → 最安値の順）。
-// 回転率は Amazon の売れ筋ランキングから決める（楽天・Yahoo! で売るルートは分からない）。
+// 回転率は Amazon の月の販売回数（Keepa）から、なければ売れ筋ランキングから決める（楽天・Yahoo! で売るルートは分からない）。
 
 import {
   MALLS,
+  type AmazonProduct,
   type ArbitrageSettings,
   type JanLookup,
   type Mall,
@@ -64,6 +65,25 @@ export function turnoverRankFromSalesRank(salesRank: number | undefined): Turnov
   return "C";
 }
 
+/**
+ * Amazon の 1 か月の販売回数の目安。Keepa のランキング上昇回数（30 日）と、Amazon が表示する
+ * 「過去 1 か月で ◯ 点以上購入」の大きい方。どちらもなければ undefined
+ */
+export function monthlySalesEstimate(product: AmazonProduct | undefined): number | undefined {
+  const values = [product?.salesRankDrops30, product?.monthlySold].filter((v): v is number => typeof v === "number" && v >= 0);
+  return values.length > 0 ? Math.max(...values) : undefined;
+}
+
+/** Amazon の回転率ランク（販売回数が分かればそれで、なければ売れ筋ランキングで決める） */
+export function amazonTurnoverRank(product: AmazonProduct | undefined): TurnoverRank {
+  const sales = monthlySalesEstimate(product);
+  if (sales === undefined) return turnoverRankFromSalesRank(product?.salesRank);
+  if (sales >= 20) return "S";
+  if (sales >= 8) return "A";
+  if (sales >= 2) return "B";
+  return "C";
+}
+
 const RANK_ORDER: Record<TurnoverRank, number> = { S: 3, A: 2, B: 1, C: 0, unknown: -1 };
 
 export function meetsMinRank(rank: TurnoverRank, min: MinRank): boolean {
@@ -112,7 +132,7 @@ export function sellFees(
 
 /** すべての「仕入れ先 → 販売先」の組み合わせを計算し、利益の大きい順に並べる */
 export function analyzeJan(lookup: JanLookup, settings: ArbitrageSettings): Analysis {
-  const amazonRank = turnoverRankFromSalesRank(lookup.amazon?.salesRank);
+  const amazonRank = amazonTurnoverRank(lookup.amazon);
   const routes: Route[] = [];
   for (const buy of MALLS) {
     const buyOption = bestBuyOption(lookup.offers[buy], settings);
