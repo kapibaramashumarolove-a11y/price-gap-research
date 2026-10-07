@@ -325,3 +325,129 @@ export async function lookupKeepa(jan: string, key: string, fetchFn: typeof fetc
   }
   return result;
 }
+
+// ---- 全自動リサーチ用: Keepa Product Finder（条件で Amazon の商品を探す）----
+// https://keepa.com/#!discuss/t/product-finder/5473
+// /query で条件に合う ASIN を取り出し、/product（asin=A,B,… 100 件ずつ・履歴なし）で JAN に変える。
+// その後の 3 モール比較（/api/jan）は JAN ごとに通常どおり Keepa を調べる。
+
+export type FinderPreset = {
+  /** 売れ筋ランキングの上限（例: 50,000 位以内） */
+  maxSalesRank: number;
+  /** 新品出品者数の範囲（ライバルが多すぎない） */
+  minNewOffers: number;
+  maxNewOffers: number;
+  /** Amazon 本体が今は販売していない（在庫切れ・出品なし）商品だけ */
+  amazonOutOfStock: boolean;
+  /** カート価格の下限 [円]（安すぎる商品は手数料で利益が出ない） */
+  minPriceJpy: number;
+};
+
+export const DEFAULT_FINDER_PRESET: FinderPreset = { maxSalesRank: 50_000, minNewOffers: 2, maxNewOffers: 10, amazonOutOfStock: true, minPriceJpy: 1500 };
+
+const KEEPA_CATEGORY_URL = "https://api.keepa.com/category";
+const KEEPA_QUERY_URL = "https://api.keepa.com/query";
+
+/** Amazon.co.jp のトップ階層のカテゴリ（Keepa から 1 度だけ取得して使い回す） */
+let keepaRootCategories: Promise<{ id: string; name: string }[]> | undefined;
+
+export function resetKeepaCategoryCache() {
+  keepaRootCategories = undefined;
+}
+
+async function keepaGet(base: string, params: Record<string, string>, key: string, fetchFn: typeof fetch): Promise<Record<string, unknown>> {
+  const url = new URL(base);
+  url.searchParams.set("key", key);
+  url.searchParams.set("domain", KEEPA_DOMAIN_JP);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  let res: Response;
+  try {
+    res = await fetchFn(url, { cache: "no-store", headers: { Accept: "application/json" } });
+  } catch {
+    throw new KeepaApiError("Amazon（Keepa）: 接続できませんでした（通信エラー）。");
+  }
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown> & KeepaResponse;
+  if (!res.ok || data.error) {
+    const detail = data.error?.message ?? data.error?.type ?? `HTTP ${res.status}`;
+    if (res.status === 429) {
+      const wait = data.refillIn ? `約 ${Math.ceil(data.refillIn / 1000)} 秒後` : "しばらく後";
+      throw new KeepaApiError(`Amazon（Keepa）: トークンが足りません（残り ${data.tokensLeft ?? 0}）。${wait}に回復します。`);
+    }
+    throw new KeepaApiError(`Amazon（Keepa）: 商品の抽出に失敗しました（${detail}）。KEEPA_API_KEY と API プラン（Product Finder が使えるか）を確認してください。`);
+  }
+  return data;
+}
+
+async function loadKeepaRootCategories(key: string, fetchFn: typeof fetch): Promise<{ id: string; name: string }[]> {
+  const data = await keepaGet(KEEPA_CATEGORY_URL, { category: "0", parents: "0" }, key, fetchFn);
+  const categories = (data.categories ?? {}) as Record<string, { catId?: number; name?: string }>;
+  return Object.entries(categories).flatMap(([id, c]) => (c?.name ? [{ id: String(c.catId ?? id), name: c.name }] : []));
+}
+
+/**
+ * Keepa Product Finder で条件に合う商品を探し、JAN の分かるものを返す。
+ * @param categoryPattern Amazon のカテゴリ名に合う正規表現（なければ全カテゴリ）
+ */
+export async function discoverKeepa(
+  categoryPattern: RegExp | undefined,
+  limit: number,
+  key: string,
+  preset: FinderPreset = DEFAULT_FINDER_PRESET,
+  fetchFn: typeof fetch = fetch,
+): Promise<{ items: { jan: string; title: string; imageUrl?: string; priceJpy?: number; note: string }[]; warnings: string[]; tokensLeft?: number }> {
+  const warnings: string[] = [];
+  let rootCategory: string[] | undefined;
+  if (categoryPattern) {
+    keepaRootCategories ??= loadKeepaRootCategories(key, fetchFn).catch((e) => {
+      keepaRootCategories = undefined;
+      throw e;
+    });
+    rootCategory = (await keepaRootCategories).filter((c) => categoryPattern.test(c.name)).map((c) => c.id);
+    if (rootCategory.length === 0) {
+      warnings.push("Amazon（Keepa）: 選んだカテゴリが見つからなかったため、全カテゴリから探しました。");
+      rootCategory = undefined;
+    }
+  }
+
+  // Keepa の perPage は 50 以上。JAN のない商品もあるので多めに取る
+  const selection: Record<string, unknown> = {
+    current_SALES_gte: 1,
+    current_SALES_lte: preset.maxSalesRank,
+    current_COUNT_NEW_gte: preset.minNewOffers,
+    current_COUNT_NEW_lte: preset.maxNewOffers,
+    current_BUY_BOX_SHIPPING_gte: preset.minPriceJpy,
+    productType: [0],
+    singleVariation: true,
+    sort: [["current_SALES", "asc"]],
+    perPage: Math.max(50, Math.min(500, Math.ceil(limit * 1.5))),
+    page: 0,
+  };
+  if (preset.amazonOutOfStock) selection.availabilityAmazon = [-1];
+  if (rootCategory) selection.rootCategory = rootCategory;
+
+  const found = await keepaGet(KEEPA_QUERY_URL, { selection: JSON.stringify(selection) }, key, fetchFn);
+  const asins = ((found.asinList as string[] | undefined) ?? []).filter((a) => typeof a === "string");
+  if (asins.length === 0) return { items: [], warnings: [...warnings, "Amazon（Keepa）: 条件に合う商品が見つかりませんでした。"], tokensLeft: found.tokensLeft as number };
+
+  // ASIN → JAN（100 件ずつまとめて・履歴なし）。必要な件数がそろったらやめる
+  const items: { jan: string; title: string; imageUrl?: string; priceJpy?: number; note: string }[] = [];
+  let tokensLeft = found.tokensLeft as number | undefined;
+  let cursor = 0;
+  while (cursor < asins.length && items.length < limit) {
+    // 足りない件数より少し多めに（JAN のない商品の分）。1 回 100 件まで
+    const size = Math.min(KEEPA_BATCH_SIZE, Math.ceil((limit - items.length) * 1.3) + 5);
+    const batch = asins.slice(cursor, cursor + size);
+    cursor += batch.length;
+    const data = await keepaRequest({ asin: batch.join(","), history: "0" }, key, fetchFn);
+    tokensLeft = data.tokensLeft ?? tokensLeft;
+    const byAsin = new Map((data.products ?? []).map((p) => [p.asin, p]));
+    for (const asin of batch) {
+      const p = byAsin.get(asin);
+      const jan = p?.eanList?.find((c) => /^(\d{13}|\d{8})$/.test(String(c)));
+      if (!p || !jan || items.some((x) => x.jan === jan)) continue;
+      items.push({ jan: String(jan), title: p.title ?? asin, imageUrl: imageOf(p), note: `Amazon ${asins.indexOf(asin) + 1}番目（ランキング順）` });
+      if (items.length >= limit) break;
+    }
+  }
+  return { items, warnings, tokensLeft };
+}

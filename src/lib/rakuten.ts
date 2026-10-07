@@ -305,3 +305,48 @@ export async function fetchRakutenRanking(
   return { offers };
 }
 
+
+// ---- 全自動リサーチ用: ポイント高倍率の商品（ブラウザから呼ぶ）----
+// 楽天の商品検索の pointRateFlag=1・pointRate（2〜10 倍以上）で、ポイント高還元の在庫あり商品を探す。
+// 楽天の商品データには JAN の項目がないので、商品名・説明文に JAN が書かれているものだけを使う（呼び出し側で抽出）。
+// ※ 楽天スーパーDEAL の商品を取り出す公開 API はないため、ポイント倍率で代用している。
+
+export function buildRakutenHighPointUrl(
+  params: { genreId: string; minPointRate: number; page: number },
+  creds: Pick<RakutenCredentials, "appId" | "affiliateId">,
+): URL {
+  const url = new URL(RAKUTEN_URL);
+  url.searchParams.set("applicationId", creds.appId);
+  if (creds.affiliateId) url.searchParams.set("affiliateId", creds.affiliateId);
+  url.searchParams.set("format", "json");
+  url.searchParams.set("formatVersion", "2");
+  url.searchParams.set("genreId", params.genreId);
+  url.searchParams.set("pointRateFlag", "1");
+  url.searchParams.set("pointRate", String(Math.min(10, Math.max(2, params.minPointRate))));
+  url.searchParams.set("availability", "1");
+  url.searchParams.set("sort", "-reviewCount");
+  url.searchParams.set("hits", String(RAKUTEN_HITS));
+  url.searchParams.set("page", String(params.page));
+  return url;
+}
+
+export async function fetchRakutenHighPoint(
+  params: { genreId: string; minPointRate: number; page: number },
+  creds: RakutenCredentials,
+  origin: string | undefined,
+  fetchFn: typeof fetch = fetch,
+): Promise<RakutenResult> {
+  let res: Response;
+  try {
+    res = await fetchFn(buildRakutenHighPointUrl(params, creds), { headers: { accessKey: creds.accessKey }, cache: "no-store" });
+  } catch {
+    return { error: "楽天: 接続できませんでした（通信エラー）。" };
+  }
+  const data = (await res.json().catch(() => ({}))) as { Items?: RakutenItem[]; error?: string; error_description?: string; errors?: { errorMessage?: string } };
+  if (res.status === 404 && data.error === "not_found") return { offers: [] };
+  if (!res.ok) {
+    const detail = data.errors?.errorMessage ?? data.error_description ?? `HTTP ${res.status}`;
+    return { error: rakutenErrorMessage(res.status, detail, origin) };
+  }
+  return { offers: parseRakutenItems(data.Items ?? []) };
+}

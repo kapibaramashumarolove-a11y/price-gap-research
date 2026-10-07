@@ -7,6 +7,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { analyzeJan, monthlySalesEstimate, type Analysis, type Route } from "@/lib/arbitrage";
 import { loadJson, saveJson } from "@/lib/browserStorage";
+import {
+  DISCOVERY_CATEGORIES,
+  DISCOVERY_LIMITS,
+  DISCOVERY_SOURCES,
+  RAKUTEN_MIN_POINT_RATE,
+  type DiscoveryCategory,
+  type DiscoverySource,
+} from "@/lib/discovery";
 import { containsJan, extractJans, normalizeJan } from "@/lib/jan";
 import { decodeCsvBytes, janListToCsv, mergeJanItems, parseJanList, type JanItem, type JanListParseResult } from "@/lib/janList";
 import type { JanCandidate } from "@/lib/janSearch";
@@ -25,13 +33,28 @@ import {
   type Risk,
   type TurnoverRank,
 } from "@/lib/malls";
-import { fetchRakuten, fetchRakutenRanking, type RakutenCredentials, type RakutenResult } from "@/lib/rakuten";
+import { fetchRakuten, fetchRakutenHighPoint, fetchRakutenRanking, type RakutenCredentials, type RakutenResult } from "@/lib/rakuten";
 import { INPUT_CLASS } from "./Fields";
 
 const ITEMS_KEY = "price-gap:jan-items";
 const SETTINGS_KEY = "price-gap:arbitrage-settings";
 const RESULTS_KEY = "price-gap:jan-results";
 const ONLY_TREASURES_KEY = "price-gap:only-treasures";
+const MODE_KEY = "price-gap:mode";
+const VIEW_KEY = "price-gap:result-view";
+const BULK_KEY = "price-gap:bulk-options";
+
+type Mode = "single" | "bulk";
+type SortKey = "profit" | "margin" | "rank";
+type ResultView = { sort: SortKey; minProfitJpy: number; noRiskOnly: boolean };
+const DEFAULT_VIEW: ResultView = { sort: "profit", minProfitJpy: 0, noRiskOnly: false };
+const MIN_PROFIT_FILTERS = [0, 1000, 3000, 5000];
+const RANK_SORT: Record<TurnoverRank, number> = { S: 4, A: 3, B: 2, C: 1, unknown: 0 };
+
+type BulkOptions = { sources: DiscoverySource[]; category: DiscoveryCategory; limit: number };
+const DEFAULT_BULK: BulkOptions = { sources: ["keepa", "yahoo"], category: "all", limit: 20 };
+/** Keepa のトークン不足のとき、回復を待つ最大時間 [ミリ秒] */
+const MAX_TOKEN_WAIT_MS = 5 * 60 * 1000;
 
 /** 楽天の API は 1 秒に 1 回までなので、JAN と JAN の間を空ける [ミリ秒] */
 const MIN_GAP_MS = 1100;
@@ -105,7 +128,12 @@ export default function ArbitrageDashboard() {
   const [results, setResults] = useState<Record<string, JanLookup>>(() => loadJson(RESULTS_KEY) ?? {});
   const [onlyTreasures, setOnlyTreasures] = useState<boolean>(() => loadJson<boolean>(ONLY_TREASURES_KEY) ?? false);
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [running, setRunning] = useState<{ jan: string; index: number; total: number } | null>(null);
+  const [running, setRunning] = useState<{ jan: string; index: number; total: number; jans: string[]; note?: string } | null>(null);
+  const [mode, setMode] = useState<Mode>(() => loadJson<Mode>(MODE_KEY) ?? "single");
+  const [view, setView] = useState<ResultView>(() => ({ ...DEFAULT_VIEW, ...loadJson<Partial<ResultView>>(VIEW_KEY) }));
+  /** 最後の全自動リサーチで調べた JAN（結果を「今回の分だけ」に絞るため） */
+  const [lastBulkJans, setLastBulkJans] = useState<string[]>([]);
+  const [onlyLastBulk, setOnlyLastBulk] = useState(false);
   const [showAllItems, setShowAllItems] = useState(false);
   const stopRequested = useRef(false);
   const rakutenCredentials = useRef<Promise<RakutenCredentials | null> | null>(null);
@@ -114,6 +142,8 @@ export default function ArbitrageDashboard() {
   useEffect(() => saveJson(SETTINGS_KEY, settings), [settings]);
   useEffect(() => saveJson(RESULTS_KEY, results), [results]);
   useEffect(() => saveJson(ONLY_TREASURES_KEY, onlyTreasures), [onlyTreasures]);
+  useEffect(() => saveJson(MODE_KEY, mode), [mode]);
+  useEffect(() => saveJson(VIEW_KEY, view), [view]);
 
   // 調べた JAN ごとに、今の設定で全ルートを計算し、一番利益の大きいルートの順に並べる
   const rows = useMemo(() => {
@@ -121,10 +151,27 @@ export default function ArbitrageDashboard() {
       const lookup = results[item.jan];
       return lookup ? [{ item, lookup, analysis: analyzeJan(lookup, settings) }] : [];
     });
-    return list.sort((a, b) => (b.analysis.best?.profitJpy ?? -Infinity) - (a.analysis.best?.profitJpy ?? -Infinity));
-  }, [items, results, settings]);
+    const profit = (r: Row) => r.analysis.best?.profitJpy ?? -Infinity;
+    const key: Record<SortKey, (r: Row) => number> = {
+      profit,
+      margin: (r) => r.analysis.best?.marginPercent ?? -Infinity,
+      // 回転率の高い順（同じなら利益の大きい順）
+      rank: (r) => (RANK_SORT[r.analysis.best?.rank ?? "unknown"] ?? 0) * 1e9 + Math.max(-1e8, Math.min(1e8, profit(r))),
+    };
+    return list.sort((a, b) => key[view.sort](b) - key[view.sort](a));
+  }, [items, results, settings, view.sort]);
   const treasureCount = rows.filter((r) => r.analysis.best?.isTreasure).length;
-  const visibleRows = onlyTreasures ? rows.filter((r) => r.analysis.best?.isTreasure) : rows;
+  const lastBulkSet = new Set(lastBulkJans);
+  const visibleRows = rows.filter((r) => {
+    const best = r.analysis.best;
+    if (onlyTreasures && !best?.isTreasure) return false;
+    if (view.minProfitJpy > 0 && (best?.profitJpy ?? -Infinity) < view.minProfitJpy) return false;
+    if (view.noRiskOnly && (!best || best.risks.length > 0)) return false;
+    if (onlyLastBulk && lastBulkSet.size > 0 && !lastBulkSet.has(r.item.jan)) return false;
+    return true;
+  });
+  // 実行中のリサーチで見つかった利益商品（推奨ルートの条件を満たすもの）の数
+  const foundInRun = running ? rows.filter((r) => running.jans.includes(r.item.jan) && r.analysis.best?.isTreasure).length : 0;
 
   /** 楽天のキー（ログイン済みのときだけサーバーから受け取る。未設定なら null）。1 回だけ取りに行く */
   function loadRakutenCredentials(): Promise<RakutenCredentials | null> {
@@ -135,7 +182,8 @@ export default function ArbitrageDashboard() {
     return rakutenCredentials.current;
   }
 
-  async function lookup(jan: string): Promise<void> {
+  /** 1 つの JAN を調べる。Keepa のトークン不足なら、回復までの秒数を返す（呼び出し側で待ってやり直す） */
+  async function lookup(jan: string): Promise<number | undefined> {
     setErrors((prev) => ({ ...prev, [jan]: "" }));
     try {
       // 楽天はブラウザから直接検索する（楽天が「許可されたWebサイト」をブラウザの送る URL で確認するため）。
@@ -157,24 +205,50 @@ export default function ArbitrageDashboard() {
         setErrors((prev) => ({ ...prev, [jan]: body.error ?? `取得に失敗しました（HTTP ${res.status}）。` }));
         return;
       }
-      setResults((prev) => ({ ...prev, [jan]: body as JanLookup }));
+      const result = body as JanLookup;
+      setResults((prev) => ({ ...prev, [jan]: result }));
+      // Keepa のトークン不足（Amazon だけ取れなかった）なら、回復を待ってやり直せるよう秒数を返す
+      const tokenWarning = result.warnings.find((w) => w.includes("トークンが足りません"));
+      if (tokenWarning) return Number(tokenWarning.match(/約 (\d+) 秒後/)?.[1] ?? 60);
     } catch {
       setErrors((prev) => ({ ...prev, [jan]: "サーバーに接続できませんでした。" }));
     }
   }
 
+  /**
+   * JAN を 1 件ずつ順番に調べる（バッチ処理）。楽天の 1 秒 1 回の制限のため間を空け、
+   * Keepa のトークンが足りなくなったら回復まで待って同じ JAN をやり直す（中止ボタンで止められる）
+   */
   async function runAll(jans: string[]) {
     stopRequested.current = false;
     for (const [index, jan] of jans.entries()) {
       // 「中止」が押されたら、今の JAN が終わったところで止める
       if (stopRequested.current) break;
-      setRunning({ jan, index: index + 1, total: jans.length });
+      setRunning({ jan, index: index + 1, total: jans.length, jans });
       const started = Date.now();
-      await lookup(jan);
+      let refillSec = await lookup(jan);
+      if (refillSec !== undefined && !stopRequested.current) {
+        const waitMs = Math.min(MAX_TOKEN_WAIT_MS, (refillSec + 2) * 1000);
+        setRunning({ jan, index: index + 1, total: jans.length, jans, note: `Keepa のトークン回復待ち（約 ${Math.ceil(waitMs / 1000)} 秒）…` });
+        for (let waited = 0; waited < waitMs && !stopRequested.current; waited += 1000) await wait(1000);
+        if (!stopRequested.current) {
+          setRunning({ jan, index: index + 1, total: jans.length, jans });
+          refillSec = await lookup(jan);
+        }
+      }
       const rest = MIN_GAP_MS - (Date.now() - started);
       if (rest > 0 && index < jans.length - 1) await wait(rest);
     }
     setRunning(null);
+  }
+
+  /** 全自動リサーチで集めた商品を一覧に足し、まとめて調べる */
+  async function runBulk(found: JanItem[]) {
+    addItems(found);
+    const jans = found.map((i) => i.jan);
+    setLastBulkJans(jans);
+    setOnlyLastBulk(true);
+    await runAll(jans);
   }
 
   function addItems(added: JanItem[]) {
@@ -217,12 +291,44 @@ export default function ArbitrageDashboard() {
         </p>
       </header>
 
-      <AddJans onAdd={addItems} onAddAndRun={(added) => {
-        addItems(added);
-        void runAll(added.map((i) => i.jan));
-      }} busy={busy} />
+      {/* リサーチモードの切り替え */}
+      <div role="tablist" className="grid grid-cols-2 gap-1 rounded-lg bg-black/[.06] p-1 dark:bg-white/[.08]">
+        {(
+          [
+            ["single", "単体JAN検索"],
+            ["bulk", "全自動バルクリサーチ"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            role="tab"
+            type="button"
+            aria-selected={mode === id}
+            onClick={() => setMode(id)}
+            className={`min-h-11 rounded-md px-2 text-sm font-medium ${mode === id ? "bg-background shadow" : "opacity-70"}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
-      <Discover existing={items} onAdd={addItems} loadRakutenCredentials={loadRakutenCredentials} busy={busy} />
+      {mode === "single" ? (
+        <>
+          <AddJans
+            onAdd={addItems}
+            onAddAndRun={(added) => {
+              addItems(added);
+              void runAll(added.map((i) => i.jan));
+            }}
+            busy={busy}
+          />
+          <Discover existing={items} onAdd={addItems} loadRakutenCredentials={loadRakutenCredentials} busy={busy} />
+        </>
+      ) : (
+        <BulkResearch loadRakutenCredentials={loadRakutenCredentials} onStart={runBulk} busy={busy} />
+      )}
+
+      {running && <RunProgress running={running} found={foundInRun} onStop={() => (stopRequested.current = true)} />}
 
       {/* 登録した JAN */}
       <section className="space-y-3">
@@ -244,7 +350,7 @@ export default function ArbitrageDashboard() {
           )}
         </div>
         {items.length === 0 ? (
-          <p className="text-sm opacity-70">上の「JAN を追加」か「JAN を探す」から登録してください。</p>
+          <p className="text-sm opacity-70">「単体JAN検索」で登録するか、「全自動バルクリサーチ」で自動で集めてください。</p>
         ) : (
           <>
             <ul className="divide-y divide-black/10 rounded-lg border border-black/10 dark:divide-white/15 dark:border-white/15">
@@ -278,16 +384,7 @@ export default function ArbitrageDashboard() {
                 {showAllItems ? "閉じる" : `残り ${items.length - ITEM_PREVIEW_COUNT} 件を表示`}
               </button>
             )}
-            {busy ? (
-              <div className="flex items-center gap-3" role="status">
-                <span className="flex-1 text-sm">
-                  調査中 {running.index}/{running.total}: <span className="font-mono">{running.jan}</span>
-                </span>
-                <button type="button" onClick={() => (stopRequested.current = true)} className={SECONDARY}>
-                  中止
-                </button>
-              </div>
-            ) : (
+            {!busy && (
               <button type="button" onClick={() => void runAll(items.map((i) => i.jan))} className={`${PRIMARY} w-full sm:w-auto sm:px-8`}>
                 すべて調べる（{items.length}件）
               </button>
@@ -305,12 +402,47 @@ export default function ArbitrageDashboard() {
       <section className="space-y-3">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-lg font-semibold">
-            結果 <span className="text-sm font-normal opacity-70">推奨 {treasureCount} 件 ／ 調査済み {rows.length} 件</span>
+            結果{" "}
+            <span className="text-sm font-normal opacity-70">
+              表示 {visibleRows.length} 件 ／ 推奨 {treasureCount} 件 ／ 調査済み {rows.length} 件
+            </span>
           </h2>
-          <label className="flex min-h-11 items-center gap-2 text-sm">
-            <input type="checkbox" checked={onlyTreasures} onChange={(e) => setOnlyTreasures(e.target.checked)} className="h-5 w-5" />
-            条件を満たす商品だけ
+        </div>
+
+        {/* 並び替え・絞り込み */}
+        <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+          <label className="flex min-w-0 flex-col gap-1">
+            <span className="text-xs opacity-70">並び替え</span>
+            <select value={view.sort} onChange={(e) => setView({ ...view, sort: e.target.value as SortKey })} className={INPUT_CLASS}>
+              <option value="profit">見込み利益順</option>
+              <option value="margin">利益率順</option>
+              <option value="rank">回転率順</option>
+            </select>
           </label>
+          <label className="flex min-w-0 flex-col gap-1">
+            <span className="text-xs opacity-70">見込み利益</span>
+            <select value={view.minProfitJpy} onChange={(e) => setView({ ...view, minProfitJpy: Number(e.target.value) })} className={INPUT_CLASS}>
+              {MIN_PROFIT_FILTERS.map((v) => (
+                <option key={v} value={v}>
+                  {v === 0 ? "すべて" : `${yen.format(v)}以上のみ`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex min-h-11 items-center gap-2">
+            <input type="checkbox" checked={view.noRiskOnly} onChange={(e) => setView({ ...view, noRiskOnly: e.target.checked })} className="h-5 w-5" />
+            リスクなしのみ
+          </label>
+          <label className="flex min-h-11 items-center gap-2">
+            <input type="checkbox" checked={onlyTreasures} onChange={(e) => setOnlyTreasures(e.target.checked)} className="h-5 w-5" />
+            推奨条件クリアのみ
+          </label>
+          {lastBulkJans.length > 0 && (
+            <label className="col-span-2 flex min-h-11 items-center gap-2">
+              <input type="checkbox" checked={onlyLastBulk} onChange={(e) => setOnlyLastBulk(e.target.checked)} className="h-5 w-5" />
+              今回の全自動リサーチ分（{lastBulkJans.length}件）だけ
+            </label>
+          )}
         </div>
 
         {allWarnings.length > 0 && (
@@ -329,7 +461,7 @@ export default function ArbitrageDashboard() {
 
         {visibleRows.length === 0 ? (
           <p className="text-sm opacity-70">
-            {rows.length === 0 ? "まだ調べていません。" : "条件を満たす商品はありません（チェックを外すとすべて表示します）。"}
+            {rows.length === 0 ? "まだ調べていません。" : "絞り込みに合う商品はありません（絞り込みを外すとすべて表示します）。"}
           </p>
         ) : (
           <>
@@ -343,6 +475,195 @@ export default function ArbitrageDashboard() {
         )}
       </section>
     </main>
+  );
+}
+
+// ---- 進捗 ----
+
+function RunProgress({
+  running,
+  found,
+  onStop,
+}: {
+  running: { jan: string; index: number; total: number; note?: string };
+  found: number;
+  onStop: () => void;
+}) {
+  const percent = Math.round(((running.index - 1) / running.total) * 100);
+  return (
+    <div className="sticky top-0 z-10 space-y-2 rounded-lg border border-black/15 bg-background p-3 shadow dark:border-white/20" role="status">
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1 text-sm">
+          <div className="font-semibold">
+            {running.index}/{running.total} 件処理中…（利益商品 {found} 件発見）
+          </div>
+          <div className="truncate text-xs opacity-70">
+            {running.note ?? (
+              <>
+                調査中: <span className="font-mono">{running.jan}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <button type="button" onClick={onStop} className={SECONDARY}>
+          中止
+        </button>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-black/10 dark:bg-white/15">
+        <div className="h-full rounded-full bg-green-600 transition-[width]" style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  );
+}
+
+// ---- 全自動バルクリサーチ（起点の商品を自動で集める） ----
+
+function BulkResearch({
+  loadRakutenCredentials,
+  onStart,
+  busy,
+}: {
+  loadRakutenCredentials: () => Promise<RakutenCredentials | null>;
+  onStart: (found: JanItem[]) => Promise<void>;
+  busy: boolean;
+}) {
+  const [options, setOptions] = useState<BulkOptions>(() => ({ ...DEFAULT_BULK, ...loadJson<Partial<BulkOptions>>(BULK_KEY) }));
+  const [log, setLog] = useState<string[]>([]);
+  const [collecting, setCollecting] = useState(false);
+  useEffect(() => saveJson(BULK_KEY, options), [options]);
+
+  const toggleSource = (id: DiscoverySource) =>
+    setOptions((prev) => ({ ...prev, sources: prev.sources.includes(id) ? prev.sources.filter((s) => s !== id) : [...prev.sources, id] }));
+
+  /** 楽天のポイント高倍率の商品から、説明文に JAN がある商品を集める（ブラウザから呼ぶ） */
+  async function collectRakuten(limit: number): Promise<{ items: JanItem[]; message: string }> {
+    const creds = await loadRakutenCredentials();
+    if (!creds) return { items: [], message: "楽天: RAKUTEN_APP_ID・RAKUTEN_ACCESS_KEY が設定されていません。" };
+    const genreId = DISCOVERY_CATEGORIES.find((c) => c.id === options.category)?.rakutenGenreId ?? "0";
+    const items: JanItem[] = [];
+    let checked = 0;
+    // 1 ページ 30 件。JAN が書かれている商品は一部なので、最大 5 ページ（1 秒あける）
+    for (let page = 1; page <= 5 && items.length < limit; page++) {
+      if (page > 1) await wait(MIN_GAP_MS);
+      const result = await fetchRakutenHighPoint({ genreId, minPointRate: RAKUTEN_MIN_POINT_RATE, page }, creds, window.location.origin);
+      if ("error" in result) return { items, message: result.error };
+      checked += result.offers.length;
+      for (const o of result.offers) {
+        const jan = extractJans(o.searchText)[0];
+        if (jan && !items.some((i) => i.jan === jan)) items.push({ jan, name: o.title.slice(0, 60) });
+        if (items.length >= limit) break;
+      }
+      if (result.offers.length < 30) break;
+    }
+    return { items, message: `楽天 高ポイント: ${checked} 件のうち JAN が分かる商品 ${items.length} 件` };
+  }
+
+  async function collectServer(source: "keepa" | "yahoo", limit: number): Promise<{ items: JanItem[]; message: string }> {
+    const label = source === "keepa" ? "Keepa条件抽出" : "Yahoo!ランキング";
+    try {
+      const res = await fetch("/api/discover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source, category: options.category, limit }),
+      });
+      if (res.status === 401) {
+        window.location.reload();
+        return { items: [], message: "" };
+      }
+      const body = await res.json();
+      if (!res.ok) return { items: [], message: body.error ?? `${label}: 取得に失敗しました（HTTP ${res.status}）。` };
+      const items = (body.items as { jan: string; title: string }[]).map((i) => ({ jan: i.jan, name: i.title.slice(0, 60) }));
+      const extra = [...(body.warnings as string[]), body.tokensLeft !== undefined ? `残りトークン ${body.tokensLeft}` : ""].filter(Boolean);
+      return { items, message: `${label}: ${items.length} 件${extra.length > 0 ? `（${extra.join("・")}）` : ""}` };
+    } catch {
+      return { items: [], message: `${label}: サーバーに接続できませんでした。` };
+    }
+  }
+
+  async function start() {
+    if (options.sources.length === 0) return;
+    setCollecting(true);
+    setLog([]);
+    // 件数はソースごとに等分（合計が「取得件数」になるように）
+    const per = Math.ceil(options.limit / options.sources.length);
+    const found: JanItem[] = [];
+    for (const source of DISCOVERY_SOURCES.map((s) => s.id).filter((id) => options.sources.includes(id))) {
+      const { items, message } = source === "rakuten" ? await collectRakuten(per) : await collectServer(source, per);
+      if (message) setLog((prev) => [...prev, message]);
+      for (const item of items) if (!found.some((f) => f.jan === item.jan)) found.push(item);
+    }
+    setCollecting(false);
+    const targets = found.slice(0, options.limit);
+    if (targets.length === 0) {
+      setLog((prev) => [...prev, "調べる商品が見つかりませんでした。カテゴリやソースを変えてください。"]);
+      return;
+    }
+    setLog((prev) => [...prev, `合計 ${targets.length} 件を 3 モールで比較します。`]);
+    await onStart(targets);
+  }
+
+  return (
+    <section className="space-y-4 rounded-lg border border-black/10 p-4 dark:border-white/15">
+      <div>
+        <h2 className="font-semibold">全自動バルクリサーチ</h2>
+        <p className="text-xs opacity-70">型番・JAN の入力は不要です。条件に合う商品を自動で集め、JAN で 3 モールを一括比較します。</p>
+      </div>
+
+      <fieldset className="space-y-1">
+        <legend className="mb-1 text-sm font-semibold">対象ソース</legend>
+        {DISCOVERY_SOURCES.map((s) => (
+          <label key={s.id} className="flex min-h-11 items-start gap-2 py-1 text-sm">
+            <input type="checkbox" checked={options.sources.includes(s.id)} onChange={() => toggleSource(s.id)} className="mt-0.5 h-5 w-5 shrink-0" />
+            <span>
+              {s.label}
+              <span className="block text-xs opacity-60">{s.hint}</span>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+
+      <div className="grid grid-cols-2 gap-3">
+        <label className="flex min-w-0 flex-col gap-1 text-sm">
+          <span>対象カテゴリ</span>
+          <select
+            value={options.category}
+            onChange={(e) => setOptions({ ...options, category: e.target.value as DiscoveryCategory })}
+            className={INPUT_CLASS}
+          >
+            {DISCOVERY_CATEGORIES.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex min-w-0 flex-col gap-1 text-sm">
+          <span>取得件数</span>
+          <select value={options.limit} onChange={(e) => setOptions({ ...options, limit: Number(e.target.value) })} className={INPUT_CLASS}>
+            {DISCOVERY_LIMITS.map((n) => (
+              <option key={n} value={n}>
+                {n} 件
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <button type="button" onClick={() => void start()} disabled={busy || collecting || options.sources.length === 0} className={`${PRIMARY} w-full`}>
+        {collecting ? "商品を集めています…" : "全自動リサーチ開始"}
+      </button>
+      {log.length > 0 && (
+        <ul className="space-y-0.5 text-xs opacity-80" role="status">
+          {log.map((l, i) => (
+            <li key={i}>・{l}</li>
+          ))}
+        </ul>
+      )}
+      <p className="text-xs opacity-60">
+        Keepa条件抽出は Product Finder と ASIN→JAN の変換でトークンを使い、その後の比較でも 1 件ごとに使います。トークンが足りなくなると回復を待ってから続きを調べます。
+        楽天スーパーDEAL の商品を取り出す公開 API はないため、ポイント 5 倍以上の商品で代用しています。
+      </p>
+    </section>
   );
 }
 
