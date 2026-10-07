@@ -6,8 +6,8 @@
 // ブラウザから呼べば、開いているサイトの URL が自動で正しく送られる。
 // https://webservice.rakuten.co.jp/documentation/ichiba-item-search
 
-import { normalizeText } from "./identify";
-import type { ItemCondition, ResearchKind, DomesticOffer } from "./researchTypes";
+import { normalizeText } from "./jan";
+import type { MallOffer } from "./malls";
 
 // 2022-06-01 版は 2026 年 8 月に停止し、「API Configuration not found」（HTTP 400）を返すようになった。
 // 入出力（formatVersion=2）の項目名は変わっていない
@@ -15,21 +15,19 @@ export const RAKUTEN_URL = "https://openapi.rakuten.co.jp/ichibams/api/IchibaIte
 /** 1 回で取れる最大件数 */
 export const RAKUTEN_HITS = 30;
 
-/** 識別子（JAN）を探すための説明文などを付けた国内の商品データ。画面には返さない */
-export type RawDomesticOffer = DomesticOffer & {
-  /** 識別子を探すときに使う文章（タイトル＋説明文） */
+/** JAN を確かめるための説明文などを付けた商品データ */
+export type RawDomesticOffer = MallOffer & {
+  /** JAN を探すときに使う文章（タイトル＋説明文） */
   searchText: string;
   /** API から分かる JAN（Yahoo! のみ） */
   jan?: string;
 };
 
 export type RakutenSearchParams = {
-  kind: ResearchKind;
+  /** 検索キーワード（JAN で照合するときは JAN そのもの） */
   keyword: string;
   minPriceJpy?: number;
   maxPriceJpy?: number;
-  jan?: string;
-  condition?: ItemCondition;
 };
 
 export type RakutenCredentials = { appId: string; accessKey: string; affiliateId?: string };
@@ -43,6 +41,8 @@ type RakutenItem = {
   itemCaption?: string;
   /** 0: 送料込み, 1: 送料別 */
   postageFlag?: number;
+  /** ショップのポイント倍率（1 = 通常の 1 倍） */
+  pointRate?: number;
   mediumImageUrls?: (string | { imageUrl?: string })[];
 };
 
@@ -91,7 +91,7 @@ export function buildRakutenSearchUrl(params: RakutenSearchParams, creds: Pick<R
   if (creds.affiliateId) url.searchParams.set("affiliateId", creds.affiliateId);
   url.searchParams.set("format", "json");
   url.searchParams.set("formatVersion", "2");
-  url.searchParams.set("keyword", rakutenKeyword(params.keyword || params.jan || ""));
+  url.searchParams.set("keyword", rakutenKeyword(params.keyword));
   url.searchParams.set("hits", String(RAKUTEN_HITS));
   url.searchParams.set("availability", "1");
   url.searchParams.set("imageFlag", "1");
@@ -119,6 +119,15 @@ export function rakutenErrorMessage(status: number, detail: string, origin: stri
   return `楽天: 検索に失敗しました（${detail}）。${sent}`;
 }
 
+/**
+ * 楽天の通常ポイント [円]。楽天のポイントは税抜価格の 1%（× ショップの倍率）。
+ * SPU（会員ごとの上乗せ）は人によって違うので、画面の設定（上乗せポイント）で足す
+ */
+export function rakutenPoints(priceJpy: number, pointRate: number | undefined): number {
+  const rate = Number.isFinite(pointRate) && (pointRate ?? 0) > 0 ? pointRate! : 1;
+  return Math.floor((Math.floor(priceJpy / 1.1) * rate) / 100);
+}
+
 /** 楽天の応答（formatVersion=2 の Items）を商品データにする */
 export function parseRakutenItems(items: RakutenItem[]): RawDomesticOffer[] {
   return items.flatMap((item): RawDomesticOffer[] => {
@@ -127,10 +136,11 @@ export function parseRakutenItems(items: RakutenItem[]): RawDomesticOffer[] {
     const image = item.mediumImageUrls?.[0];
     return [
       {
-        source: "rakuten",
+        mall: "rakuten",
         title: normalizeText(item.itemName),
         priceJpy: price,
         shipping: item.postageFlag === 0 ? "free" : item.postageFlag === 1 ? "extra" : "unknown",
+        pointsJpy: rakutenPoints(price, Number(item.pointRate)),
         url: item.affiliateUrl || item.itemUrl,
         shopName: item.shopName ?? "",
         imageUrl: (typeof image === "string" ? image : image?.imageUrl) || undefined,
@@ -156,7 +166,7 @@ export async function fetchRakuten(
   fetchFn: typeof fetch = fetch,
   headers: Record<string, string> = {},
 ): Promise<RakutenResult> {
-  if (rakutenKeyword(params.keyword || params.jan || "") === "") {
+  if (rakutenKeyword(params.keyword) === "") {
     return { error: "楽天: 検索キーワードに楽天で使える単語がありません（1 文字だけの単語は楽天では検索できません）。キーワードを変えてください。" };
   }
   let res: Response;
@@ -197,7 +207,7 @@ function httpsUrl(value: unknown): string | undefined {
 }
 
 /**
- * /api/research に送られてきた楽天の結果（ブラウザで検索したもの）を検査する。
+ * /api/jan に送られてきた楽天の結果（ブラウザで検索したもの）を検査する。
  * 形がおかしい商品は捨て、件数も上限で切る。送られていなければ undefined（サーバー側で検索する）。
  */
 export function parseClientRakuten(value: unknown): RakutenResult | undefined {
@@ -213,12 +223,16 @@ export function parseClientRakuten(value: unknown): RakutenResult | undefined {
     const priceJpy = typeof r.priceJpy === "number" && Number.isFinite(r.priceJpy) && r.priceJpy >= 0 ? r.priceJpy : undefined;
     const shipping = r.shipping === "free" || r.shipping === "extra" || r.shipping === "unknown" ? r.shipping : undefined;
     if (!title || !url || priceJpy === undefined || !shipping) return [];
+    // ポイントは商品価格を超えない範囲だけ受け付ける
+    const pointsJpy =
+      typeof r.pointsJpy === "number" && Number.isFinite(r.pointsJpy) && r.pointsJpy >= 0 ? Math.min(Math.floor(r.pointsJpy), priceJpy) : 0;
     return [
       {
-        source: "rakuten",
+        mall: "rakuten",
         title,
         priceJpy,
         shipping,
+        pointsJpy,
         url,
         shopName: str(r.shopName, 200) ?? "",
         imageUrl: httpsUrl(r.imageUrl),
@@ -251,7 +265,8 @@ export function buildRakutenRankingUrl(
   if (creds.affiliateId) url.searchParams.set("affiliateId", creds.affiliateId);
   url.searchParams.set("format", "json");
   url.searchParams.set("formatVersion", "2");
-  url.searchParams.set("genreId", params.genreId);
+  // ジャンル "0" は総合ランキング（genreId を付けない）
+  if (params.genreId !== "0") url.searchParams.set("genreId", params.genreId);
   if (params.period === "realtime") url.searchParams.set("period", "realtime");
   url.searchParams.set("page", String(params.page));
   return url;
@@ -288,13 +303,3 @@ export async function fetchRakutenRanking(
   return { offers };
 }
 
-/** /api/discover に送られてきたランキングの商品を検査する（形がおかしいものは捨て、件数も上限で切る） */
-export function parseClientRanked(value: unknown, max: number): (RawDomesticOffer & { rank: number })[] {
-  if (!Array.isArray(value)) return [];
-  return value.slice(0, max).flatMap((raw) => {
-    const parsed = parseClientRakuten({ offers: [raw] });
-    const offer = parsed && "offers" in parsed ? parsed.offers[0] : undefined;
-    const rank = Number((raw as { rank?: unknown })?.rank);
-    return offer && Number.isInteger(rank) && rank > 0 ? [{ ...offer, rank }] : [];
-  });
-}

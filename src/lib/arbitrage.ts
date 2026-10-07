@@ -1,0 +1,147 @@
+// 国内 3 モールの価格差から「どこで仕入れてどこで売ると一番得か」を計算する（画面側で使う。通信はしない）。
+//
+//   実質仕入れ値 = 商品価格 + 送料 − ポイント（モールのポイント＋会員ランクなどの上乗せ。現金換算の割合を掛ける）
+//   利益         = 販売価格 − 販売手数料 − 発送・納品コスト − 実質仕入れ値
+//   利益率       = 利益 ÷ 販売価格
+//
+// 販売価格は、販売先のモールで今売られている最安値（Amazon は FBA の最安値 → カート価格 → 最安値の順）。
+// 回転率は Amazon の売れ筋ランキングから決める（楽天・Yahoo! で売るルートは分からない）。
+
+import {
+  MALLS,
+  type ArbitrageSettings,
+  type JanLookup,
+  type Mall,
+  type MallOffer,
+  type MinRank,
+  type TurnoverRank,
+} from "./malls";
+
+export type BuyOption = {
+  offer: MallOffer;
+  /** 送料 [円] */
+  shippingJpy: number;
+  /** 現金換算したポイント [円] */
+  pointsJpy: number;
+  /** 実質仕入れ値（商品価格 + 送料 − ポイント）[円] */
+  netJpy: number;
+};
+
+export type Route = {
+  buy: Mall;
+  sell: Mall;
+  buyOption: BuyOption;
+  /** 販売価格 [円] */
+  sellPriceJpy: number;
+  /** 販売手数料 [円] */
+  sellFeesJpy: number;
+  /** Amazon の手数料を SP-API で見積もれたか（false なら設定の割合で計算） */
+  feesFromApi: boolean;
+  /** 発送・納品コスト [円] */
+  sellShippingJpy: number;
+  profitJpy: number;
+  marginPercent: number;
+  rank: TurnoverRank;
+  /** 推奨ルートの条件（利益・利益率・回転率）を満たすか */
+  isTreasure: boolean;
+};
+
+export type Analysis = {
+  /** 計算できたルート（利益の大きい順） */
+  routes: Route[];
+  /** 一番利益の大きいルート */
+  best?: Route;
+  /** Amazon の売れ筋ランキングからの回転率 */
+  amazonRank: TurnoverRank;
+};
+
+/** Amazon の売れ筋ランキングから回転率ランクを決める（目安。カテゴリによって売れ方は違う） */
+export function turnoverRankFromSalesRank(salesRank: number | undefined): TurnoverRank {
+  if (salesRank === undefined || !Number.isFinite(salesRank) || salesRank <= 0) return "unknown";
+  if (salesRank <= 5_000) return "S";
+  if (salesRank <= 30_000) return "A";
+  if (salesRank <= 100_000) return "B";
+  return "C";
+}
+
+const RANK_ORDER: Record<TurnoverRank, number> = { S: 3, A: 2, B: 1, C: 0, unknown: -1 };
+
+export function meetsMinRank(rank: TurnoverRank, min: MinRank): boolean {
+  return min === "none" || RANK_ORDER[rank] >= RANK_ORDER[min];
+}
+
+/** そのモールで、ポイントと送料を含めて一番安く仕入れられる出品 */
+export function bestBuyOption(offers: MallOffer[], settings: ArbitrageSettings): BuyOption | undefined {
+  const options = offers.map((offer): BuyOption => {
+    const shippingJpy = offer.shipping === "free" ? 0 : (offer.shippingJpy ?? settings.buyShippingJpy);
+    const rawPoints = offer.pointsJpy + (offer.priceJpy * settings.extraPointPercent[offer.mall]) / 100;
+    const pointsJpy = Math.floor((rawPoints * settings.pointValuePercent) / 100);
+    return { offer, shippingJpy, pointsJpy, netJpy: offer.priceJpy + shippingJpy - pointsJpy };
+  });
+  return options.reduce<BuyOption | undefined>((best, o) => (!best || o.netJpy < best.netJpy ? o : best), undefined);
+}
+
+/** 販売先のモールで売るときの販売価格（そのモールで今売られている最安値）。売られていなければ undefined */
+export function sellPriceOn(lookup: JanLookup, mall: Mall): number | undefined {
+  if (mall === "amazon") {
+    const a = lookup.amazon;
+    return a?.lowestFbaPriceJpy ?? a?.buyBoxPriceJpy ?? a?.lowestPriceJpy;
+  }
+  const prices = lookup.offers[mall].map((o) => o.priceJpy);
+  return prices.length > 0 ? Math.min(...prices) : undefined;
+}
+
+/** 販売手数料。Amazon は SP-API の見積もり（販売価格が違えば販売手数料の差を調整）、なければ設定の割合 */
+export function sellFees(
+  lookup: JanLookup,
+  mall: Mall,
+  priceJpy: number,
+  settings: ArbitrageSettings,
+): { feesJpy: number; fromApi: boolean } {
+  const channel = settings.sell[mall];
+  if (mall === "amazon") {
+    const a = lookup.amazon;
+    if (a?.fbaFeesJpy !== undefined && a.feesForPriceJpy !== undefined) {
+      const adjust = ((priceJpy - a.feesForPriceJpy) * channel.feePercent) / 100;
+      return { feesJpy: Math.round(a.fbaFeesJpy + adjust), fromApi: true };
+    }
+    return { feesJpy: Math.round((priceJpy * channel.feePercent) / 100 + settings.amazonFallbackFbaFeeJpy), fromApi: false };
+  }
+  return { feesJpy: Math.round((priceJpy * channel.feePercent) / 100), fromApi: false };
+}
+
+/** すべての「仕入れ先 → 販売先」の組み合わせを計算し、利益の大きい順に並べる */
+export function analyzeJan(lookup: JanLookup, settings: ArbitrageSettings): Analysis {
+  const amazonRank = turnoverRankFromSalesRank(lookup.amazon?.salesRank);
+  const routes: Route[] = [];
+  for (const buy of MALLS) {
+    const buyOption = bestBuyOption(lookup.offers[buy], settings);
+    if (!buyOption) continue;
+    for (const sell of MALLS) {
+      if (sell === buy || !settings.sell[sell].enabled) continue;
+      const sellPriceJpy = sellPriceOn(lookup, sell);
+      if (sellPriceJpy === undefined) continue;
+      const { feesJpy, fromApi } = sellFees(lookup, sell, sellPriceJpy, settings);
+      const sellShippingJpy = settings.sell[sell].shippingJpy;
+      const profitJpy = Math.round(sellPriceJpy - feesJpy - sellShippingJpy - buyOption.netJpy);
+      const marginPercent = sellPriceJpy > 0 ? (profitJpy / sellPriceJpy) * 100 : 0;
+      const rank = sell === "amazon" ? amazonRank : "unknown";
+      routes.push({
+        buy,
+        sell,
+        buyOption,
+        sellPriceJpy,
+        sellFeesJpy: feesJpy,
+        feesFromApi: fromApi,
+        sellShippingJpy,
+        profitJpy,
+        marginPercent,
+        rank,
+        isTreasure:
+          profitJpy >= settings.minProfitJpy && marginPercent >= settings.minMarginPercent && meetsMinRank(rank, settings.minRank),
+      });
+    }
+  }
+  routes.sort((a, b) => b.profitJpy - a.profitJpy);
+  return { routes, best: routes[0], amazonRank };
+}

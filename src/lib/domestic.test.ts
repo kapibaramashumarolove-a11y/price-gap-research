@@ -5,7 +5,7 @@ function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
-const params = { kind: "sealed" as const, keyword: "テラスタルフェス BOX", minPriceJpy: 3000 };
+const params = { keyword: "テラスタルフェス BOX", minPriceJpy: 3000 };
 
 describe("searchRakuten", () => {
   const env = { RAKUTEN_APP_ID: "app", RAKUTEN_ACCESS_KEY: "key" };
@@ -22,6 +22,7 @@ describe("searchRakuten", () => {
             shopName: "ショップA",
             itemCaption: "JAN:4521329362342",
             postageFlag: 0,
+            pointRate: 5,
             mediumImageUrls: ["https://thumbnail.image.rakuten.co.jp/a.jpg"],
           },
           { itemName: "送料別の商品", itemPrice: 18000, itemUrl: "https://item.rakuten.co.jp/shop/b/", postageFlag: 1 },
@@ -44,14 +45,16 @@ describe("searchRakuten", () => {
     });
 
     expect(offers[0]).toMatchObject({
-      source: "rakuten",
+      mall: "rakuten",
       priceJpy: 19800,
       shipping: "free",
+      // 税抜 18,000 円 × 1% × 5 倍
+      pointsJpy: 900,
       url: "https://item.rakuten.co.jp/shop/a/",
       imageUrl: "https://thumbnail.image.rakuten.co.jp/a.jpg",
     });
     expect(offers[0].searchText).toContain("4521329362342");
-    expect(offers[1].shipping).toBe("extra");
+    expect(offers[1]).toMatchObject({ shipping: "extra", pointsJpy: 163 });
   });
 
   it("Vercel では、デプロイごとに変わる URL ではなく本番 URL を送る", async () => {
@@ -94,7 +97,7 @@ describe("searchRakuten", () => {
 });
 
 describe("searchYahoo", () => {
-  it("JAN・送料・HTML の文字参照を読み取る", async () => {
+  it("JAN で新品・在庫ありを検索し、JAN・送料・ポイント・HTML の文字参照を読み取る", async () => {
     const fetchFn = vi.fn<typeof fetch>(async () =>
       jsonResponse({
         hits: [
@@ -106,32 +109,42 @@ describe("searchYahoo", () => {
             image: { medium: "https://item-shopping.c.yimg.jp/i/g/a" },
             seller: { name: "ストアA" },
             shipping: { code: 2, name: "送料無料" },
+            point: { amount: 191, times: 1, bonusAmount: 959, bonusTimes: 5 },
           },
           { name: "条件付き送料無料", url: "https://store.shopping.yahoo.co.jp/s/b.html", price: 12700, janCode: "", shipping: { code: 3 } },
         ],
       }),
     );
-    const offers = await searchYahoo(params, { YAHOO_CLIENT_ID: "cid" }, fetchFn as unknown as typeof fetch);
+    const offers = await searchYahoo({ jan: "4521329362342" }, { YAHOO_CLIENT_ID: "cid" }, fetchFn as unknown as typeof fetch);
 
     const url = new URL(String(fetchFn.mock.calls[0][0]));
     expect(url.searchParams.get("appid")).toBe("cid");
+    expect(url.searchParams.get("jan_code")).toBe("4521329362342");
+    expect(url.searchParams.get("query")).toBeNull();
     expect(url.searchParams.get("condition")).toBe("new");
-    expect(url.searchParams.get("price_from")).toBe("3000");
+    expect(url.searchParams.get("in_stock")).toBe("true");
 
     expect(offers[0]).toMatchObject({
-      source: "yahoo",
+      mall: "yahoo",
+      pointsJpy: 1150,
       title: "ポケモンカードゲーム テラスタルフェスex BOX スカーレット&バイオレット",
       shipping: "free",
       jan: "4521329362342",
       shopName: "ストアA",
     });
-    expect(offers[1]).toMatchObject({ shipping: "unknown", jan: undefined });
+    expect(offers[1]).toMatchObject({ shipping: "unknown", jan: undefined, pointsJpy: 0 });
   });
 
-  it("カードは中古扱いの出品も含める", async () => {
+  it("キーワードでも検索できる（JAN を探すとき）", async () => {
     const fetchFn = vi.fn<typeof fetch>(async () => jsonResponse({ hits: [] }));
-    await searchYahoo({ ...params, kind: "psa10" }, { YAHOO_CLIENT_ID: "cid" }, fetchFn as unknown as typeof fetch);
-    expect(new URL(String(fetchFn.mock.calls[0][0])).searchParams.get("condition")).toBeNull();
+    await searchYahoo({ keyword: "スイッチ" }, { YAHOO_CLIENT_ID: "cid" }, fetchFn as unknown as typeof fetch);
+    const url = new URL(String(fetchFn.mock.calls[0][0]));
+    expect(url.searchParams.get("query")).toBe("スイッチ");
+    expect(url.searchParams.get("jan_code")).toBeNull();
+  });
+
+  it("キーが未設定ならエラー", async () => {
+    await expect(searchYahoo({ jan: "4521329362342" }, {}, vi.fn())).rejects.toBeInstanceOf(DomesticApiError);
   });
 });
 
@@ -142,7 +155,8 @@ describe("parseClientRakuten（ブラウザで検索した楽天の結果の検�
     expect(parseClientRakuten({ error: "楽天: アクセスが拒否されました" })).toEqual({ error: "楽天: アクセスが拒否されました" });
     const result = parseClientRakuten({
       offers: [
-        { title: "BOSS DS-1", priceJpy: 4500, shipping: "free", url: "https://item.rakuten.co.jp/a/", shopName: "A", searchText: "BOSS DS-1" },
+        { title: "BOSS DS-1", priceJpy: 4500, shipping: "free", pointsJpy: 40, url: "https://item.rakuten.co.jp/a/", shopName: "A", searchText: "BOSS DS-1" },
+        { title: "ポイントが価格より大きい", priceJpy: 100, shipping: "free", pointsJpy: 99999, url: "https://item.rakuten.co.jp/d/" },
         { title: "危ない URL", priceJpy: 1, shipping: "free", url: "javascript:alert(1)" },
         { title: "価格なし", shipping: "free", url: "https://item.rakuten.co.jp/b/" },
         { title: "送料が不正", priceJpy: 1, shipping: "maybe", url: "https://item.rakuten.co.jp/c/" },
@@ -150,7 +164,8 @@ describe("parseClientRakuten（ブラウザで検索した楽天の結果の検�
     });
     expect(result).toEqual({
       offers: [
-        { source: "rakuten", title: "BOSS DS-1", priceJpy: 4500, shipping: "free", url: "https://item.rakuten.co.jp/a/", shopName: "A", imageUrl: undefined, searchText: "BOSS DS-1" },
+        { mall: "rakuten", title: "BOSS DS-1", priceJpy: 4500, shipping: "free", pointsJpy: 40, url: "https://item.rakuten.co.jp/a/", shopName: "A", imageUrl: undefined, searchText: "BOSS DS-1" },
+        { mall: "rakuten", title: "ポイントが価格より大きい", priceJpy: 100, shipping: "free", pointsJpy: 100, url: "https://item.rakuten.co.jp/d/", shopName: "", imageUrl: undefined, searchText: "ポイントが価格より大きい" },
       ],
     });
   });
@@ -181,7 +196,7 @@ describe("rakutenKeyword（楽天の検索キーワードの決まりに合わ�
   it("使える単語がなければ楽天を呼ばずにエラー", async () => {
     const { fetchRakuten } = await import("./rakuten");
     const fetchFn = vi.fn<typeof fetch>();
-    const result = await fetchRakuten({ kind: "item", keyword: "A の" }, { appId: "a", accessKey: "k" }, undefined, fetchFn);
+    const result = await fetchRakuten({ keyword: "A の" }, { appId: "a", accessKey: "k" }, undefined, fetchFn);
     expect(result).toMatchObject({ error: expect.stringMatching(/1 文字だけの単語/) });
     expect(fetchFn).not.toHaveBeenCalled();
   });

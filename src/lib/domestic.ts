@@ -1,24 +1,16 @@
 // 楽天市場・Yahoo!ショッピングの公式 API で国内の商品を検索する（サーバー側専用）。
 // キー（RAKUTEN_APP_ID / YAHOO_CLIENT_ID）を扱うので、ブラウザ側からは import しないこと。
 
-import { cleanEnvValue } from "./ebay";
-import { normalizeText } from "./identify";
-import { fetchRakuten, type RakutenCredentials, type RawDomesticOffer } from "./rakuten";
-import type { ItemCondition, ResearchKind, ShippingStatus } from "./researchTypes";
+import { cleanEnvValue } from "./env";
+import { normalizeText } from "./jan";
+import type { ShippingStatus } from "./malls";
+import { fetchRakuten, type RakutenCredentials, type RakutenSearchParams, type RawDomesticOffer } from "./rakuten";
 
 export type { RawDomesticOffer };
 
-export type DomesticSearchParams = {
-  kind: ResearchKind;
-  keyword: string;
-  minPriceJpy?: number;
-  maxPriceJpy?: number;
+export type DomesticSearchParams = RakutenSearchParams & {
   /** このサイト自身の URL（例: https://example.vercel.app）。楽天に送る Referer / Origin に使う */
   siteOrigin?: string;
-  /** 商品指定のみ: JAN コード（Yahoo! は JAN で完全一致検索、楽天はキーワードがなければ JAN で検索） */
-  jan?: string;
-  /** 商品指定のみ: 商品の状態 */
-  condition?: ItemCondition;
 };
 
 /** 画面にそのまま表示してよい（キーの値を含まない）エラー */
@@ -98,6 +90,8 @@ type YahooHit = {
   seller?: { name?: string };
   /** code 1: 設定なし, 2: 送料無料, 3: 条件付き送料無料 */
   shipping?: { code?: number };
+  /** amount: 通常ポイント, bonusAmount: ストアのボーナス（PayPay ポイント） */
+  point?: { amount?: number; bonusAmount?: number };
 };
 
 export function isYahooConfigured(env: Record<string, string | undefined> = process.env): boolean {
@@ -109,8 +103,19 @@ function yahooShipping(code: number | undefined): ShippingStatus {
   return "unknown";
 }
 
+/** Yahoo! のポイント（通常＋ストアのボーナス）[円]。LYP 会員などの上乗せは画面の設定で足す */
+export function yahooPoints(point: YahooHit["point"]): number {
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+  return Math.floor(n(point?.amount) + n(point?.bonusAmount));
+}
+
+export type YahooSearchParams =
+  | { jan: string; keyword?: undefined }
+  | { keyword: string; jan?: undefined };
+
+/** Yahoo!ショッピングで新品・在庫ありの商品を探す（JAN 指定なら JAN で、なければキーワードで） */
 export async function searchYahoo(
-  params: DomesticSearchParams,
+  params: YahooSearchParams,
   env: Record<string, string | undefined> = process.env,
   fetchFn: typeof fetch = fetch,
 ): Promise<RawDomesticOffer[]> {
@@ -120,16 +125,18 @@ export async function searchYahoo(
   const url = new URL(YAHOO_URL);
   url.searchParams.set("appid", clientId);
   if (params.jan) url.searchParams.set("jan_code", params.jan);
-  else url.searchParams.set("query", params.keyword);
+  else url.searchParams.set("query", params.keyword ?? "");
   url.searchParams.set("results", String(YAHOO_RESULTS));
   url.searchParams.set("in_stock", "true");
-  // 未開封 BOX・その他は新品だけ、商品指定は指定の状態。カードは中古扱いで出品されることが多いので絞らない
-  const condition = params.kind === "item" ? (params.condition ?? "new") : params.kind === "sealed" || params.kind === "other" ? "new" : "any";
-  if (condition !== "any") url.searchParams.set("condition", condition);
-  if (params.minPriceJpy) url.searchParams.set("price_from", String(params.minPriceJpy));
-  if (params.maxPriceJpy) url.searchParams.set("price_to", String(params.maxPriceJpy));
+  url.searchParams.set("condition", "new");
+  url.searchParams.set("sort", "+price");
 
-  const res = await fetchFn(url, { cache: "no-store" });
+  let res: Response;
+  try {
+    res = await fetchFn(url, { cache: "no-store" });
+  } catch {
+    throw new DomesticApiError("Yahoo!: 接続できませんでした（通信エラー）。");
+  }
   const data = (await res.json().catch(() => ({}))) as {
     hits?: YahooHit[];
     Error?: { Message?: string };
@@ -148,10 +155,11 @@ export async function searchYahoo(
     if (!hit.name || !hit.url || !Number.isFinite(price)) return [];
     return [
       {
-        source: "yahoo",
+        mall: "yahoo",
         title: normalizeText(hit.name),
         priceJpy: price,
         shipping: yahooShipping(hit.shipping?.code),
+        pointsJpy: yahooPoints(hit.point),
         url: hit.url,
         shopName: hit.seller?.name ?? "",
         imageUrl: hit.image?.medium || undefined,

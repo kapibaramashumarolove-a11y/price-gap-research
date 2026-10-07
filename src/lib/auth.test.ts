@@ -57,7 +57,7 @@ describe("isCorrectPassword", () => {
 
 describe("safeNextPath", () => {
   it("サイト内のパスだけ許可する", () => {
-    expect(safeNextPath("/api/ebay/search?q=x")).toBe("/api/ebay/search?q=x");
+    expect(safeNextPath("/api/jan?x=1")).toBe("/api/jan?x=1");
     expect(safeNextPath("https://evil.example")).toBe("/");
     expect(safeNextPath("//evil.example")).toBe("/");
     expect(safeNextPath("/\\evil.example")).toBe("/");
