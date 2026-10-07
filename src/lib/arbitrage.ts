@@ -4,7 +4,8 @@
 //   利益         = 販売価格 − 販売手数料 − 発送・納品コスト − 実質仕入れ値
 //   利益率       = 利益 ÷ 販売価格
 //
-// 販売価格は、販売先のモールで今売られている最安値（Amazon は FBA の最安値 → カート価格 → 最安値の順）。
+// 販売価格は、販売先のモールで今売られている価格（Amazon はカート価格 → FBA の最安値 → 最安値の順、楽天・Yahoo! は最安値）。
+// 最適ルートは「利益 × 回転率の重み」が一番大きいルート（利益が同じなら売れやすい方、少し利益が小さくてもよく売れる方を選ぶ）。
 // 回転率は Amazon の月の販売回数（Keepa）から、なければ売れ筋ランキングから決める（楽天・Yahoo! で売るルートは分からない）。
 
 import {
@@ -66,11 +67,12 @@ export function turnoverRankFromSalesRank(salesRank: number | undefined): Turnov
 }
 
 /**
- * Amazon の 1 か月の販売回数の目安。Keepa のランキング上昇回数（30 日）と、Amazon が表示する
- * 「過去 1 か月で ◯ 点以上購入」の大きい方。どちらもなければ undefined
+ * Amazon の 1 か月の販売回数の目安。Keepa のランキング変動回数（30 日、90 日 ÷ 3）と、Amazon が表示する
+ * 「過去 1 か月で ◯ 点以上購入」の一番大きい値。どれもなければ undefined
  */
 export function monthlySalesEstimate(product: AmazonProduct | undefined): number | undefined {
-  const values = [product?.salesRankDrops30, product?.monthlySold].filter((v): v is number => typeof v === "number" && v >= 0);
+  const drops90 = typeof product?.salesRankDrops90 === "number" && product.salesRankDrops90 >= 0 ? Math.round(product.salesRankDrops90 / 3) : undefined;
+  const values = [product?.salesRankDrops30, drops90, product?.monthlySold].filter((v): v is number => typeof v === "number" && v >= 0);
   return values.length > 0 ? Math.max(...values) : undefined;
 }
 
@@ -82,6 +84,19 @@ export function amazonTurnoverRank(product: AmazonProduct | undefined): Turnover
   if (sales >= 8) return "A";
   if (sales >= 2) return "B";
   return "C";
+}
+
+/** 最適ルートを選ぶときの回転率の重み（回転率の分からないルートは中くらいとみなす） */
+export const TURNOVER_WEIGHT: Record<TurnoverRank, number> = { S: 1, A: 0.85, B: 0.6, C: 0.3, unknown: 0.5 };
+
+/**
+ * 最適ルート: 条件（利益・利益率・回転率）を満たすルートがあればその中から、なければ全ルートから、
+ * 「利益 × 回転率の重み」が一番大きいもの。利益の出るルートがなければ、損の一番小さいもの
+ */
+export function pickBestRoute(routes: Route[]): Route | undefined {
+  const pool = routes.some((r) => r.isTreasure) ? routes.filter((r) => r.isTreasure) : routes;
+  const score = (r: Route) => (r.profitJpy > 0 ? r.profitJpy * TURNOVER_WEIGHT[r.rank] : r.profitJpy);
+  return pool.reduce<Route | undefined>((best, r) => (!best || score(r) > score(best) ? r : best), undefined);
 }
 
 const RANK_ORDER: Record<TurnoverRank, number> = { S: 3, A: 2, B: 1, C: 0, unknown: -1 };
@@ -105,7 +120,7 @@ export function bestBuyOption(offers: MallOffer[], settings: ArbitrageSettings):
 export function sellPriceOn(lookup: JanLookup, mall: Mall): number | undefined {
   if (mall === "amazon") {
     const a = lookup.amazon;
-    return a?.lowestFbaPriceJpy ?? a?.buyBoxPriceJpy ?? a?.lowestPriceJpy;
+    return a?.buyBoxPriceJpy ?? a?.lowestFbaPriceJpy ?? a?.lowestPriceJpy;
   }
   const prices = lookup.offers[mall].map((o) => o.priceJpy);
   return prices.length > 0 ? Math.min(...prices) : undefined;
@@ -163,5 +178,5 @@ export function analyzeJan(lookup: JanLookup, settings: ArbitrageSettings): Anal
     }
   }
   routes.sort((a, b) => b.profitJpy - a.profitJpy);
-  return { routes, best: routes[0], amazonRank };
+  return { routes, best: pickBestRoute(routes), amazonRank };
 }

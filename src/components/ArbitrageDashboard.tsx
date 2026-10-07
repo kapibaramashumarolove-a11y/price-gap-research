@@ -331,11 +331,14 @@ export default function ArbitrageDashboard() {
             {rows.length === 0 ? "まだ調べていません。" : "条件を満たす商品はありません（チェックを外すとすべて表示します）。"}
           </p>
         ) : (
+          <>
+          <RouteSummary rows={visibleRows} />
           <ul className="space-y-4">
             {visibleRows.map((row) => (
               <ResultCard key={row.item.jan} row={row} settings={settings} onRefresh={() => void runAll([row.item.jan])} busy={busy} />
             ))}
           </ul>
+          </>
         )}
       </section>
     </main>
@@ -793,13 +796,80 @@ function BestRoute({ best }: { best: Route | undefined }) {
   );
 }
 
+/** Amazon の売れ行き（Keepa のランキング変動回数など）と回転率の判定 */
+function SalesVelocity({ amazon, rank }: { amazon: NonNullable<JanLookup["amazon"]>; rank: TurnoverRank }) {
+  const monthly = monthlySalesEstimate(amazon);
+  const fast = rank === "S" || rank === "A";
+  const slow = rank === "C";
+  return (
+    <div className="flex items-start gap-2 rounded-lg bg-black/[.04] p-3 text-sm dark:bg-white/[.06]">
+      <span className={`shrink-0 rounded px-1.5 text-xs font-bold ${RANK_STYLE[rank]}`} title={RANK_INFO[rank].hint}>
+        {RANK_INFO[rank].label}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className={`font-semibold ${fast ? "text-green-700 dark:text-green-400" : slow ? "text-red-600" : ""}`}>
+          {fast ? "高回転（すぐ売れる）" : slow ? "低回転（売れにくい）" : rank === "B" ? "中回転" : "回転率不明"}
+          {monthly !== undefined && <span className="font-normal"> ・ 月 約 {monthly} 個</span>}
+        </div>
+        <div className="text-xs opacity-70">
+          {[
+            amazon.salesRankDrops30 !== undefined && `ランキング変動 30日 ${amazon.salesRankDrops30}回`,
+            amazon.salesRankDrops90 !== undefined && `90日 ${amazon.salesRankDrops90}回`,
+            amazon.monthlySold !== undefined && `Amazon 表示「過去1か月で${amazon.monthlySold}点以上購入」`,
+            amazon.salesRank !== undefined && `${amazon.salesRankCategory ?? ""} ${amazon.salesRank.toLocaleString()}位`,
+            amazon.offerCount !== undefined && `新品出品者 ${amazon.offerCount}人`,
+          ]
+            .filter(Boolean)
+            .join(" ・ ") || "売れ行きのデータがありません"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 結果の上に出す、最適ルートの一覧（タップで各商品へ移動） */
+function RouteSummary({ rows }: { rows: Row[] }) {
+  const withRoute = rows.filter((r) => r.analysis.best && r.analysis.best.profitJpy > 0);
+  if (withRoute.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-black/10 dark:border-white/15">
+      <div className="px-3 pt-2 text-sm font-semibold">最適ルート一覧（利益 × 回転率）</div>
+      <ol className="divide-y divide-black/10 dark:divide-white/15">
+        {withRoute.map(({ item, lookup, analysis }) => {
+          const best = analysis.best!;
+          return (
+            <li key={item.jan}>
+              <a
+                href={`#jan-${lookup.jan}`}
+                className={`flex min-h-12 items-center gap-2 px-3 py-2 text-sm ${best.isTreasure ? "bg-green-600/10" : ""}`}
+              >
+                <span className={`shrink-0 rounded px-1.5 text-xs font-bold ${RANK_STYLE[best.rank]}`}>{RANK_INFO[best.rank].label}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate">{lookup.title || item.name || lookup.jan}</span>
+                  <span className={`block text-xs ${best.isTreasure ? "font-semibold text-green-700 dark:text-green-400" : "opacity-70"}`}>
+                    {routeLabel(best)}
+                  </span>
+                </span>
+                <span className="shrink-0 text-right">
+                  <span className={`block font-bold ${best.isTreasure ? "text-green-600" : ""}`}>{yen.format(best.profitJpy)}</span>
+                  <span className="block text-xs opacity-60">{RANK_WORD[best.rank]}</span>
+                </span>
+              </a>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: ArbitrageSettings; onRefresh: () => void; busy: boolean }) {
   const { item, lookup, analysis } = row;
   const { best } = analysis;
   const amazon = lookup.amazon;
 
   return (
-    <li className={`space-y-3 rounded-lg border p-4 ${best?.isTreasure ? "border-green-600/60" : "border-black/10 dark:border-white/15"}`}>
+    <li id={`jan-${lookup.jan}`} className={`scroll-mt-4 space-y-3 rounded-lg border p-4 ${best?.isTreasure ? "border-green-600/60" : "border-black/10 dark:border-white/15"}`}>
       <div className="flex gap-3">
         {lookup.imageUrl && (
           // 各モールの画像サーバーの画像をそのまま表示する
@@ -838,12 +908,19 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
           <dd className="text-right">
             {yen.format(best.sellPriceJpy)}
             <span className="block text-xs opacity-60">
-              {SELL_LABEL[best.sell]}の最安値 ・ 手数料 −{yen.format(best.sellFeesJpy)}
-              {best.sell === "amazon" && (best.feesFromApi ? "（SP-API 見積もり）" : "（設定の割合）")} ・ 送料 −{yen.format(best.sellShippingJpy)}
+              {best.sell === "amazon"
+                ? amazon?.buyBoxPriceJpy === best.sellPriceJpy
+                  ? "Amazon のカート価格"
+                  : "Amazon の FBA 最安値"
+                : `${SELL_LABEL[best.sell]}の最安値`}{" "}
+              ・ 手数料 −{yen.format(best.sellFeesJpy)}
+              {best.sell === "amazon" && (best.feesFromApi ? "（販売手数料＋FBA 手数料）" : "（設定の割合）")} ・ 送料 −{yen.format(best.sellShippingJpy)}
             </span>
           </dd>
         </dl>
       )}
+
+      {amazon && <SalesVelocity amazon={amazon} rank={analysis.amazonRank} />}
 
       {/* 3 モールの価格と在庫 */}
       <div className="divide-y divide-black/10 rounded-lg border border-black/10 text-sm dark:divide-white/15 dark:border-white/15">

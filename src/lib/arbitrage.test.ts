@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { amazonTurnoverRank, analyzeJan, bestBuyOption, sellFees, sellPriceOn, turnoverRankFromSalesRank } from "./arbitrage";
+import { amazonTurnoverRank, analyzeJan, pickBestRoute, bestBuyOption, sellFees, sellPriceOn, turnoverRankFromSalesRank } from "./arbitrage";
 import { DEFAULT_ARBITRAGE_SETTINGS, type ArbitrageSettings, type JanLookup, type MallOffer } from "./malls";
 
 function offer(o: Partial<MallOffer> & Pick<MallOffer, "mall" | "priceJpy">): MallOffer {
@@ -19,8 +19,8 @@ function lookup(overrides: Partial<JanLookup> = {}): JanLookup {
       asin: "B000TEST00",
       title: "テスト商品",
       salesRank: 12000,
-      lowestFbaPriceJpy: 15000,
-      buyBoxPriceJpy: 14800,
+      buyBoxPriceJpy: 15000,
+      lowestFbaPriceJpy: 14800,
       fbaFeesJpy: 2100,
       feesForPriceJpy: 15000,
       url: "https://www.amazon.co.jp/dp/B000TEST00",
@@ -53,9 +53,9 @@ describe("bestBuyOption", () => {
 });
 
 describe("sellPriceOn / sellFees", () => {
-  it("Amazon は FBA 最安値 → カート価格 → 最安値の順、楽天・Yahoo! はそのモールの最安値", () => {
+  it("Amazon はカート価格 → FBA 最安値 → 最安値の順、楽天・Yahoo! はそのモールの最安値", () => {
     expect(sellPriceOn(lookup(), "amazon")).toBe(15000);
-    expect(sellPriceOn(lookup({ amazon: { ...lookup().amazon!, lowestFbaPriceJpy: undefined } }), "amazon")).toBe(14800);
+    expect(sellPriceOn(lookup({ amazon: { ...lookup().amazon!, buyBoxPriceJpy: undefined } }), "amazon")).toBe(14800);
     expect(sellPriceOn(lookup(), "rakuten")).toBe(10000);
     expect(sellPriceOn(lookup({ amazon: undefined }), "amazon")).toBeUndefined();
   });
@@ -85,8 +85,29 @@ describe("amazonTurnoverRank", () => {
     expect(amazonTurnoverRank({ ...p, salesRankDrops30: 25 })).toBe("S");
     expect(amazonTurnoverRank({ ...p, salesRankDrops30: 3, monthlySold: 10 })).toBe("A");
     expect(amazonTurnoverRank({ ...p, salesRankDrops30: 1 })).toBe("C");
+    // 90 日の回数 ÷ 3 も見る（30 日がたまたま少ないとき）
+    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 1, salesRankDrops90: 30 })).toBe("A");
     expect(amazonTurnoverRank(p)).toBe("S");
     expect(amazonTurnoverRank(undefined)).toBe("unknown");
+  });
+});
+
+describe("pickBestRoute", () => {
+  const route = (profitJpy: number, rank: "S" | "A" | "B" | "C" | "unknown", isTreasure = true) =>
+    ({ profitJpy, rank, isTreasure }) as Parameters<typeof pickBestRoute>[0][number];
+
+  it("利益 × 回転率の重みが一番大きいルートを選ぶ（少し利益が小さくてもよく売れる方）", () => {
+    const fast = route(3000, "S");
+    const slow = route(3500, "C");
+    expect(pickBestRoute([slow, fast])).toBe(fast);
+    expect(pickBestRoute([route(3000, "B"), route(7000, "C")])?.profitJpy).toBe(7000);
+  });
+
+  it("条件を満たすルートがあればその中から、利益の出るルートがなければ損の一番小さいもの", () => {
+    const treasure = route(1500, "A");
+    expect(pickBestRoute([route(9000, "S", false), treasure])).toBe(treasure);
+    expect(pickBestRoute([route(-500, "S", false), route(-100, "C", false)])?.profitJpy).toBe(-100);
+    expect(pickBestRoute([])).toBeUndefined();
   });
 });
 

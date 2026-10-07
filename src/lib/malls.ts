@@ -47,8 +47,10 @@ export type AmazonProduct = {
   salesRankDrops90?: number;
   /** Amazon が表示している「過去 1 か月で ◯ 点以上購入」（Keepa） */
   monthlySold?: number;
-  /** Amazon 本体が販売しているか（Keepa） */
+  /** Amazon 本体が販売している（またはカートを持っている）か（Keepa） */
   amazonSelling?: boolean;
+  /** カートを持っている出品が FBA か（Keepa） */
+  buyBoxIsFba?: boolean;
   /** カートを取っている価格（送料込み）[円] */
   buyBoxPriceJpy?: number;
   /** FBA の新品の最安値（送料込み）[円] */

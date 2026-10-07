@@ -25,7 +25,13 @@ const product = {
   referralFeePercentage: 10,
   fbaFees: { pickAndPackFee: 514 },
   // 1: 新品最安 / 3: ランキング / 7: 自社発送最安（送料込み） / 10: FBA 最安 / 11: 新品の出品者数 / 18: カート
-  stats: { current: current({ 1: 31000, 3: 152, 7: 31500, 10: 32980, 11: 12, 18: 32980 }), salesRankDrops30: 25, salesRankDrops90: 70 },
+  stats: {
+    current: current({ 1: 31000, 3: 152, 7: 31500, 10: 32980, 11: 12, 18: 32980 }),
+    salesRankDrops30: 25,
+    salesRankDrops90: 70,
+    buyBoxIsAmazon: false,
+    buyBoxIsFBA: true,
+  },
 };
 
 describe("lookupKeepa", () => {
@@ -35,7 +41,7 @@ describe("lookupKeepa", () => {
 
     const url = new URL(String(fetchFn.mock.calls[0][0]));
     expect(url.origin + url.pathname).toBe("https://api.keepa.com/product");
-    expect(Object.fromEntries(url.searchParams)).toMatchObject({ domain: "5", code: JAN, stats: "90", history: "0" });
+    expect(Object.fromEntries(url.searchParams)).toMatchObject({ domain: "5", code: JAN, stats: "90", history: "0", buybox: "1" });
 
     expect(result.product).toEqual({
       asin: "B0TEST0001",
@@ -51,6 +57,7 @@ describe("lookupKeepa", () => {
       lowestPriceJpy: 31000,
       offerCount: 12,
       amazonSelling: false,
+      buyBoxIsFba: true,
       // 32,980 × 10% + 514
       fbaFeesJpy: 3812,
       feesForPriceJpy: 32980,

@@ -3,7 +3,7 @@
 //
 // Keepa の API はキーを URL の key パラメーターで受け取る仕様なので、URL はログやエラーに出さないこと。
 // https://keepa.com/#!discuss/t/request-products/110
-// 1 商品（stats 付き・履歴なし）で 1 トークン使う。トークンはプランごとに 1 分あたりの量で回復する。
+// 1 商品につき、stats（集計）で 1 トークン＋ buybox（カート価格）の追加分を使う。トークンはプランごとに 1 分あたりの量で回復する。
 
 import { cleanEnvValue } from "./env";
 import type { AmazonLookup } from "./amazon";
@@ -47,6 +47,8 @@ type KeepaProduct = {
     avg90?: number[];
     salesRankDrops30?: number;
     salesRankDrops90?: number;
+    buyBoxIsAmazon?: boolean | null;
+    buyBoxIsFBA?: boolean | null;
   } | null;
 };
 
@@ -107,12 +109,13 @@ export function parseKeepaProduct(p: KeepaProduct): AmazonLookup {
     lowestFbaPriceJpy: lowestFba.length > 0 ? Math.min(...lowestFba) : undefined,
     lowestPriceJpy: lowestAll.length > 0 ? Math.min(...lowestAll) : undefined,
     offerCount: count(cur?.[CSV.COUNT_NEW]),
-    amazonSelling: amazonPrice !== undefined,
+    amazonSelling: amazonPrice !== undefined || p.stats?.buyBoxIsAmazon === true,
+    buyBoxIsFba: typeof p.stats?.buyBoxIsFBA === "boolean" ? p.stats.buyBoxIsFBA : undefined,
     url,
   };
 
-  // 手数料: 販売手数料（%）＋ FBA 配送代行手数料（円）を、販売価格（FBA 最安値 → カート → 最安値）で計算
-  const sellPrice = product.lowestFbaPriceJpy ?? product.buyBoxPriceJpy ?? product.lowestPriceJpy;
+  // 手数料: 販売手数料（%）＋ FBA 配送代行手数料（円）を、販売価格（カート → FBA 最安値 → 最安値）で計算
+  const sellPrice = product.buyBoxPriceJpy ?? product.lowestFbaPriceJpy ?? product.lowestPriceJpy;
   const referral = p.referralFeePercentage ?? p.referralFeePercent;
   const pickAndPack = p.fbaFees?.pickAndPackFee;
   if (sellPrice !== undefined && typeof referral === "number" && typeof pickAndPack === "number" && pickAndPack > 0) {
@@ -131,7 +134,7 @@ export function parseKeepaProduct(p: KeepaProduct): AmazonLookup {
   offers.sort((a, b) => a.priceJpy - b.priceJpy);
 
   const warnings: string[] = [];
-  if (amazonPrice !== undefined) warnings.push("Amazon: Amazon 本体が販売しているため、出品してもカートを取りにくい商品です。");
+  if (product.amazonSelling) warnings.push("Amazon: Amazon 本体が販売しているため、出品してもカートを取りにくい商品です。");
   if (sellPrice === undefined) warnings.push("Amazon: 新品の出品がありません（Keepa）。");
   else if (product.fbaFeesJpy === undefined) warnings.push("Amazon: Keepa に手数料の情報がないため、設定の割合で計算しています。");
   return { product, offers, warnings };
@@ -145,6 +148,8 @@ export async function lookupKeepa(jan: string, key: string, fetchFn: typeof fetc
   url.searchParams.set("code", jan);
   url.searchParams.set("stats", STATS_DAYS);
   url.searchParams.set("history", "0");
+  // カート価格（stats.current[18]）とカートの持ち主を含める
+  url.searchParams.set("buybox", "1");
 
   let res: Response;
   try {

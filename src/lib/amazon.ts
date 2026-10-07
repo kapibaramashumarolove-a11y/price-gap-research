@@ -344,8 +344,8 @@ export async function lookupAmazon(jan: string, creds: AmazonCredentials, deps: 
     url: amazonProductUrl(asin),
   };
 
-  // 販売価格（FBA 最安値 → カート価格 → 最安値）で手数料を見積もる。見積もれなくても比較は続ける
-  const sellPrice = prices.lowestFbaPriceJpy ?? prices.buyBoxPriceJpy ?? prices.lowestPriceJpy;
+  // 販売価格（カート価格 → FBA 最安値 → 最安値）で手数料を見積もる。見積もれなくても比較は続ける
+  const sellPrice = prices.buyBoxPriceJpy ?? prices.lowestFbaPriceJpy ?? prices.lowestPriceJpy;
   if (sellPrice !== undefined) {
     try {
       const fees = await estimateFbaFees(asin, sellPrice, creds, deps);
