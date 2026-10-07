@@ -4,7 +4,8 @@
 //   - Amazon  … カタログを JAN で検索し、商品ページに登録された JAN（EAN）と一致するものだけ
 //   - Yahoo!  … JAN で検索し、商品データの janCode が一致するものだけ（キーワード検索のような付属品の混入がない）
 //   - 楽天    … 楽天の API には JAN の項目がないため、JAN で検索し、商品名・説明文に JAN がそのまま書かれているものだけ
-// さらに「2個セット」「まとめ買い」など 1 個の値段ではない出品は除く（JAN は 1 個の商品に付く番号のため）。
+// さらに「2個セット」「まとめ買い」など 1 個の値段ではない出品と、中古・開封品・訳ありなど新品ではない出品を除く。
+// （楽天の API には新品・中古の区別がなく、Yahoo! もストアの登録しだいなので、商品名・説明文でも確かめる）
 
 import type { AmazonLookup } from "./amazon";
 import { containsJan } from "./jan";
@@ -31,6 +32,48 @@ const SET_PATTERN = new RegExp(
 
 export function isMultiUnitListing(title: string): boolean {
   return SET_PATTERN.test(title);
+}
+
+/** 商品名に書かれていれば新品ではないとみなす言葉 */
+const USED_TITLE_PATTERN = new RegExp(
+  [
+    "中古",
+    "(?<![A-Za-z])USED(?![A-Za-z])",
+    "ユーズド",
+    "リユース",
+    "開封済",
+    "開封品",
+    "(?<!新品[\\s・]?)未使用",
+    "展示品",
+    "展示処分",
+    "アウトレット",
+    "訳あり",
+    "訳アリ",
+    "わけあり",
+    "ジャンク",
+    "難あり",
+    "難有",
+    "傷あり",
+    "箱(?:なし|無し|潰れ|つぶれ|傷み|痛み|ダメージ)",
+    "外箱(?:なし|無し|潰れ|ダメージ)",
+    "リファービッシュ",
+    "整備済",
+    "再生品",
+    "美品",
+    "(?<!無印)良品",
+    "(?:中古|状態|商品)ランク",
+    "ランク[SABC](?![A-Za-z])",
+    "(?<![A-Za-z])[SABC]ランク",
+  ].join("|"),
+  "i",
+);
+
+/** 説明文に書かれていれば新品ではないとみなす表現（説明文は注意書きが多いので、はっきりしたものだけ） */
+const USED_TEXT_PATTERN = /【中古】|［中古］|\[中古\]|中古品(?!では|でない|ではな)|中古商品(?!では|ではな)|(?:商品|状態|コンディション)ランク|状態[:：]\s*(?:中古|使用感|良好|目立った)/;
+
+/** 中古・開封品・訳ありなど、新品として仕入れられない出品か */
+export function isUsedListing(offer: Pick<RawDomesticOffer, "title" | "searchText" | "used">): boolean {
+  return !!offer.used || USED_TITLE_PATTERN.test(offer.title) || USED_TEXT_PATTERN.test(offer.searchText);
 }
 
 export type LookupDeps = {
@@ -87,14 +130,19 @@ export async function lookupJan(jan: string, rakuten: RakutenResult | undefined,
   // Amazon の商品名自体がセット商品（例: 「24本入り×2ケース」の JAN）なら、セット表記で除かない
   const skipSetFilter = amazon?.product ? isMultiUnitListing(amazon.product.title) : false;
   let excludedSets = 0;
-  const single = <T extends MallOffer>(offers: T[]): T[] =>
-    skipSetFilter
-      ? offers
-      : offers.filter((o) => {
-          const set = isMultiUnitListing(o.title);
-          if (set) excludedSets++;
-          return !set;
-        });
+  let excludedUsed = 0;
+  const single = (offers: RawDomesticOffer[]): RawDomesticOffer[] =>
+    offers.filter((o) => {
+      if (isUsedListing(o)) {
+        excludedUsed++;
+        return false;
+      }
+      if (!skipSetFilter && isMultiUnitListing(o.title)) {
+        excludedSets++;
+        return false;
+      }
+      return true;
+    });
 
   // ---- Yahoo! ----
   let yahoo: RawDomesticOffer[] = [];
@@ -125,6 +173,7 @@ export async function lookupJan(jan: string, rakuten: RakutenResult | undefined,
     amazon: product,
     warnings,
     excludedSets,
+    excludedUsed,
     fetchedAt: (deps.now?.() ?? new Date()).toISOString(),
   };
 }

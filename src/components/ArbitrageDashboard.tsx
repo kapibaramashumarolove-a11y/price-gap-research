@@ -920,8 +920,9 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
         </details>
       )}
 
-      {(lookup.excludedSets > 0 || lookup.warnings.length > 0) && (
+      {(lookup.excludedSets > 0 || (lookup.excludedUsed ?? 0) > 0 || lookup.warnings.length > 0) && (
         <ul className="space-y-0.5 text-xs text-amber-700 dark:text-amber-400">
+          {(lookup.excludedUsed ?? 0) > 0 && <li>中古・開封品・訳ありなど新品ではない出品 {lookup.excludedUsed} 件を除きました。</li>}
           {lookup.excludedSets > 0 && <li>複数個セットの出品 {lookup.excludedSets} 件は 1 個の値段ではないため除きました。</li>}
           {lookup.warnings.map((w) => (
             <li key={w}>⚠ {w}</li>

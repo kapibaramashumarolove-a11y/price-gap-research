@@ -21,6 +21,8 @@ export type RawDomesticOffer = MallOffer & {
   searchText: string;
   /** API から分かる JAN（Yahoo! のみ） */
   jan?: string;
+  /** API で中古と分かる出品（Yahoo! のみ） */
+  used?: boolean;
 };
 
 export type RakutenSearchParams = {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { isMultiUnitListing, lookupJan, type LookupDeps } from "./lookup";
+import { isMultiUnitListing, isUsedListing, lookupJan, type LookupDeps } from "./lookup";
 import type { RawDomesticOffer } from "./rakuten";
 
 const JAN = "4902370548495";
@@ -18,6 +18,42 @@ describe("isMultiUnitListing", () => {
     for (const t of ["ニンテンドースイッチ 本体", "iPhone 15 Pro Max 256GB", "PS5 1台", "Galaxy Tab S9 x 1", "ボールペン 10本入"]) {
       expect(isMultiUnitListing(t), t).toBe(false);
     }
+  });
+});
+
+describe("isUsedListing", () => {
+  const used = (title: string, searchText = title, flag?: boolean) => isUsedListing({ title, searchText, used: flag });
+
+  it("商品名の中古・開封品・訳あり・状態ランクなどを見分ける", () => {
+    for (const t of [
+      "【中古】ニンテンドースイッチ 本体",
+      "Switch 本体 USED",
+      "スイッチ 開封済み 未使用品",
+      "スイッチ 展示品",
+      "訳あり 箱潰れ スイッチ",
+      "スイッチ 美品 ランクA",
+      "スイッチ Bランク",
+      "ジャンク スイッチ",
+    ]) {
+      expect(used(t), t).toBe(true);
+    }
+  });
+
+  it("新品の出品は残す（「新品未使用」「無印良品」「UNUSED」などは中古扱いしない）", () => {
+    for (const t of ["ニンテンドースイッチ 本体 新品", "新品未使用 スイッチ", "無印良品 収納ケース", "UNUSED パーカー", "スイッチ 送料無料"]) {
+      expect(used(t), t).toBe(false);
+    }
+  });
+
+  it("説明文は、はっきりした中古の表記だけを見る（「中古品ではありません」は新品）", () => {
+    expect(used("スイッチ 本体", "【中古】動作確認済み")).toBe(true);
+    expect(used("スイッチ 本体", "商品ランク：B 使用感があります")).toBe(true);
+    expect(used("スイッチ 本体", "当店の商品は中古品ではありません。メーカー保証付きの新品です")).toBe(false);
+    expect(used("スイッチ 本体", "中古買取もお気軽に")).toBe(false);
+  });
+
+  it("API で中古と分かる出品（Yahoo! の condition）", () => {
+    expect(used("スイッチ 本体", "スイッチ 本体", true)).toBe(true);
   });
 });
 
@@ -49,6 +85,29 @@ describe("lookupJan", () => {
     expect(result.offers.rakuten[0]).not.toHaveProperty("searchText");
     expect(result.warnings).toEqual([expect.stringMatching(/^Amazon: SP-API のキー/)]);
     expect(result.fetchedAt).toBe("2026-10-07T00:00:00.000Z");
+  });
+
+  it("楽天・Yahoo! の中古の出品を除き、数を返す", async () => {
+    const result = await lookupJan(
+      JAN,
+      {
+        offers: [
+          raw({ mall: "rakuten", title: "スイッチ 本体 新品", priceJpy: 31000, searchText: `JAN:${JAN}` }),
+          raw({ mall: "rakuten", title: "【中古】スイッチ 本体", priceJpy: 22000, searchText: `【中古】JAN:${JAN}` }),
+          raw({ mall: "rakuten", title: "スイッチ 本体", priceJpy: 23000, searchText: `JAN:${JAN} 商品ランク：A` }),
+        ],
+      },
+      {
+        yahoo: async () => [
+          raw({ mall: "yahoo", title: "スイッチ 本体", priceJpy: 30000, jan: JAN }),
+          raw({ mall: "yahoo", title: "スイッチ 本体", priceJpy: 21000, jan: JAN, used: true }),
+        ],
+        now,
+      },
+    );
+    expect(result.offers.rakuten.map((o) => o.priceJpy)).toEqual([31000]);
+    expect(result.offers.yahoo.map((o) => o.priceJpy)).toEqual([30000]);
+    expect(result.excludedUsed).toBe(3);
   });
 
   it("Amazon の商品名を優先し、Amazon の商品自体がセット商品ならセット表記で除かない", async () => {

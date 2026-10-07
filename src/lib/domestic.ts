@@ -86,6 +86,8 @@ type YahooHit = {
   url?: string;
   price?: number;
   janCode?: string;
+  /** "new" / "used" */
+  condition?: string;
   image?: { medium?: string };
   seller?: { name?: string };
   /** code 1: 設定なし, 2: 送料無料, 3: 条件付き送料無料 */
@@ -165,6 +167,7 @@ export async function searchYahoo(
         imageUrl: hit.image?.medium || undefined,
         searchText: `${hit.name} ${hit.description ?? ""}`,
         jan: hit.janCode || undefined,
+        used: hit.condition === "used" || undefined,
       },
     ];
   });

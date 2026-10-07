@@ -1,7 +1,7 @@
 // キーワード検索の結果から JAN ごとにまとめる（「JAN が分からない商品」を探すための補助）。
 
 import { isValidJan } from "./jan";
-import { isMultiUnitListing } from "./lookup";
+import { isMultiUnitListing, isUsedListing } from "./lookup";
 import type { RawDomesticOffer } from "./rakuten";
 
 export type JanCandidate = { jan: string; title: string; imageUrl?: string; minPriceJpy: number; count: number };
@@ -10,7 +10,7 @@ export type JanCandidate = { jan: string; title: string; imageUrl?: string; minP
 export function findJansByKeyword(offers: RawDomesticOffer[]): JanCandidate[] {
   const byJan = new Map<string, JanCandidate>();
   for (const o of offers) {
-    if (!o.jan || !isValidJan(o.jan) || isMultiUnitListing(o.title)) continue;
+    if (!o.jan || !isValidJan(o.jan) || isMultiUnitListing(o.title) || isUsedListing(o)) continue;
     const prev = byJan.get(o.jan);
     if (prev) {
       prev.count++;

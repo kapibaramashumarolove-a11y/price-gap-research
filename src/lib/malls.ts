@@ -70,6 +70,8 @@ export type JanLookup = {
   warnings: string[];
   /** 複数個セットなど、1 個の値段ではないため除いた出品数 */
   excludedSets: number;
+  /** 中古・開封品・訳ありなど、新品ではないため除いた出品数（古い結果にはない） */
+  excludedUsed?: number;
   fetchedAt: string;
 };
 

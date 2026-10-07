@@ -111,7 +111,7 @@ describe("searchYahoo", () => {
             shipping: { code: 2, name: "送料無料" },
             point: { amount: 191, times: 1, bonusAmount: 959, bonusTimes: 5 },
           },
-          { name: "条件付き送料無料", url: "https://store.shopping.yahoo.co.jp/s/b.html", price: 12700, janCode: "", shipping: { code: 3 } },
+          { name: "条件付き送料無料", url: "https://store.shopping.yahoo.co.jp/s/b.html", price: 12700, janCode: "", shipping: { code: 3 }, condition: "used" },
         ],
       }),
     );
@@ -132,7 +132,8 @@ describe("searchYahoo", () => {
       jan: "4521329362342",
       shopName: "ストアA",
     });
-    expect(offers[1]).toMatchObject({ shipping: "unknown", jan: undefined, pointsJpy: 0 });
+    expect(offers[1]).toMatchObject({ shipping: "unknown", jan: undefined, pointsJpy: 0, used: true });
+    expect(offers[0].used).toBeUndefined();
   });
 
   it("キーワードでも検索できる（JAN を探すとき）", async () => {
