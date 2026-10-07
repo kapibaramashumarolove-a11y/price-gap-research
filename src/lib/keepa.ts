@@ -22,8 +22,8 @@ const KEEPA_DOMAIN_JP = "5";
 const STATS_DAYS = "90";
 /** 出品者数の推移を見るために付ける履歴の日数 */
 const HISTORY_DAYS = "15";
-/** バリエーションの売れ筋シェアを調べる兄弟 ASIN の上限（1 ASIN につき 1 トークン） */
-export const MAX_VARIATIONS_TO_CHECK = 20;
+/** バリエーションの売れ筋シェアを調べる兄弟 ASIN の上限（1 ASIN につき 1 トークン。まとめて 1 回で取得し、6 時間使い回す） */
+export const MAX_VARIATIONS_TO_CHECK = 50;
 /** Amazon.co.jp 本体の出品者 ID */
 const AMAZON_JP_SELLER_ID = "AN1VRQENFRJN5";
 
@@ -223,33 +223,76 @@ async function keepaRequest(params: Record<string, string>, key: string, fetchFn
   return data;
 }
 
+/** 1 回のリクエストで送れる ASIN の数（Keepa の上限） */
+const KEEPA_BATCH_SIZE = 100;
+/** 同じ親 ASIN のバリエーション情報を使い回す時間（同じ商品の色違いを続けて調べてもトークンを使わない） */
+const VARIATION_CACHE_MS = 6 * 60 * 60 * 1000;
+
+/** 兄弟 ASIN ごとの、シェア計算に使う値（購入数・レビュー数） */
+type VariationMetrics = { sold: number; reviews: number };
+const variationCache = new Map<string, { at: number; siblings: string[]; metrics: Map<string, VariationMetrics> }>();
+
+/** テスト用: 使い回しているバリエーション情報を消す */
+export function resetKeepaCache() {
+  variationCache.clear();
+}
+
+function metricsOf(p: KeepaProduct): VariationMetrics {
+  return { sold: p.monthlySold && p.monthlySold > 0 ? p.monthlySold : 0, reviews: value(p.stats?.current, CSV.COUNT_REVIEWS) ?? 0 };
+}
+
 /**
  * バリエーションの売れ筋シェア。親 ASIN から兄弟 ASIN を調べ、この ASIN の販売数（Amazon の「過去 1 か月で ◯ 点以上購入」。
  * なければレビュー数）が全バリエーションの何 % かを出す。
+ *
+ * トークンの節約:
+ *   - 兄弟 ASIN は 1 件ずつではなく asin=A,B,C… でまとめて取得（100 件ずつ）。履歴（csv）は付けない（history=0）
+ *   - 調べている ASIN 自身はすでに取得済みなので、兄弟のリクエストから外す
+ *   - 同じ親 ASIN の結果は 6 時間使い回す（色違い・サイズ違いを続けて調べても兄弟を取り直さない）
+ * Keepa は 1 商品につき 1 トークンかかるので、兄弟が N 個なら最初の 1 回だけ「親 1 ＋ 兄弟 N−1」トークン。
  */
 async function checkVariations(
-  product: AmazonProduct,
+  self: KeepaProduct,
   parentAsin: string,
   key: string,
   fetchFn: typeof fetch,
+  now: number,
 ): Promise<Pick<AmazonProduct, "variationCount" | "variationSharePercent" | "variationShareBasis">> {
-  const parent = (await keepaRequest({ asin: parentAsin, history: "0" }, key, fetchFn)).products?.[0];
-  const siblings = [...new Set((parent?.variations ?? []).map((v) => v.asin).filter((a): a is string => !!a))];
+  const selfAsin = self.asin ?? "";
+  let cached = variationCache.get(parentAsin);
+  if (!cached || now - cached.at > VARIATION_CACHE_MS) {
+    const parent = (await keepaRequest({ asin: parentAsin, history: "0" }, key, fetchFn)).products?.[0];
+    const siblings = [...new Set((parent?.variations ?? []).map((v) => v.asin).filter((a): a is string => !!a))];
+    const metrics = new Map<string, VariationMetrics>();
+    if (siblings.length > 1 && siblings.length <= MAX_VARIATIONS_TO_CHECK) {
+      const others = siblings.filter((a) => a !== selfAsin);
+      for (let i = 0; i < others.length; i += KEEPA_BATCH_SIZE) {
+        // 購入数（monthlySold）とレビュー数（stats.current）だけ使うので、集計は最小の 1 日・履歴なし
+        const data = await keepaRequest({ asin: others.slice(i, i + KEEPA_BATCH_SIZE).join(","), stats: "1", history: "0" }, key, fetchFn);
+        for (const p of data.products ?? []) if (p.asin) metrics.set(p.asin, metricsOf(p));
+      }
+    }
+    cached = { at: now, siblings, metrics };
+    variationCache.set(parentAsin, cached);
+  }
+
+  const { siblings } = cached;
   if (siblings.length <= 1) return { variationCount: siblings.length || undefined };
   if (siblings.length > MAX_VARIATIONS_TO_CHECK) return { variationCount: siblings.length };
 
-  const data = await keepaRequest({ asin: siblings.join(","), stats: "30", history: "0" }, key, fetchFn);
-  const items = data.products ?? [];
-  const sold = (p: KeepaProduct) => (p.monthlySold && p.monthlySold > 0 ? p.monthlySold : 0);
-  const reviews = (p: KeepaProduct) => value(p.stats?.current, CSV.COUNT_REVIEWS) ?? 0;
-  const self = items.find((p) => p.asin === product.asin);
-  const share = (metric: (p: KeepaProduct) => number) => {
-    const total = items.reduce((sum, p) => sum + metric(p), 0);
-    return self && total > 0 ? Math.round((metric(self) / total) * 1000) / 10 : undefined;
+  // 自分の値は今取得した最新のものを使う
+  const metrics = new Map(cached.metrics);
+  metrics.set(selfAsin, metricsOf(self));
+  cached.metrics.set(selfAsin, metricsOf(self));
+  const all = siblings.map((a) => metrics.get(a)).filter((m): m is VariationMetrics => !!m);
+  const mine = metrics.get(selfAsin)!;
+  const share = (key: keyof VariationMetrics) => {
+    const total = all.reduce((sum, m) => sum + m[key], 0);
+    return total > 0 ? Math.round((mine[key] / total) * 1000) / 10 : undefined;
   };
-  const bySold = share(sold);
+  const bySold = share("sold");
   if (bySold !== undefined) return { variationCount: siblings.length, variationSharePercent: bySold, variationShareBasis: "sold" };
-  const byReviews = share(reviews);
+  const byReviews = share("reviews");
   return { variationCount: siblings.length, variationSharePercent: byReviews, variationShareBasis: byReviews === undefined ? undefined : "reviews" };
 }
 
@@ -272,7 +315,7 @@ export async function lookupKeepa(jan: string, key: string, fetchFn: typeof fetc
 
   if (best.parentAsin && result.product) {
     try {
-      Object.assign(result.product, await checkVariations(result.product, best.parentAsin, key, fetchFn));
+      Object.assign(result.product, await checkVariations(best, best.parentAsin, key, fetchFn, now()));
     } catch (e) {
       result.warnings.push(e instanceof KeepaApiError ? `${e.message}（バリエーションの確認）` : "Amazon（Keepa）: バリエーションを確認できませんでした。");
     }

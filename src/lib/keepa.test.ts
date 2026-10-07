@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
-import { historyValueAt, KeepaApiError, keepaMinuteToMs, lookupKeepa, MAX_VARIATIONS_TO_CHECK, readKeepaKey } from "./keepa";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { historyValueAt, KeepaApiError, keepaMinuteToMs, lookupKeepa, MAX_VARIATIONS_TO_CHECK, readKeepaKey, resetKeepaCache } from "./keepa";
+
+beforeEach(() => resetKeepaCache());
 
 const JAN = "4902370548495";
 /** テストの「今」（Keepa 時間で表す） */
@@ -115,20 +117,45 @@ describe("lookupKeepa", () => {
   it("バリエーション商品は、親 ASIN → 兄弟 ASIN を調べて購入数のシェアを出す", async () => {
     const child = { ...product, parentAsin: "B0PARENT" };
     const parent = { asin: "B0PARENT", variations: [{ asin: "B0TEST0001" }, { asin: "B0RED" }, { asin: "B0BLUE" }] };
+    // 調べている ASIN（B0TEST0001）の購入数 50 は最初のリクエストの child から使う
+    const child50 = { ...child, monthlySold: 50 };
     const siblings = [
-      { asin: "B0TEST0001", monthlySold: 50 },
       { asin: "B0RED", monthlySold: 400 },
       { asin: "B0BLUE", monthlySold: 550 },
     ];
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
       const params = new URL(String(input)).searchParams;
-      if (params.get("code")) return json({ products: [child] });
+      if (params.get("code")) return json({ products: [child50] });
       if (params.get("asin") === "B0PARENT") return json({ products: [parent] });
       return json({ products: siblings });
     });
     const result = await lookupKeepa(JAN, "k", fetchFn, () => NOW_MS);
-    expect(result.product).toMatchObject({ variationCount: 3, variationSharePercent: 5, variationShareBasis: "sold" });
-    expect(new URL(String(fetchFn.mock.calls[2][0])).searchParams.get("asin")).toBe("B0TEST0001,B0RED,B0BLUE");
+    expect(result.product).toMatchObject({ variationCount: 3, variationSharePercent: 5, variationShareBasis: "sold", monthlySold: 50 });
+    // 兄弟はまとめて 1 回・履歴なし。自分自身は取り直さない
+    const siblingsCall = new URL(String(fetchFn.mock.calls[2][0])).searchParams;
+    expect(siblingsCall.get("asin")).toBe("B0RED,B0BLUE");
+    expect(siblingsCall.get("history")).toBe("0");
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+
+    // 同じ親の商品をもう一度調べても、親・兄弟は取り直さない（6 時間使い回す）
+    await lookupKeepa(JAN, "k", fetchFn, () => NOW_MS + 60_000);
+    expect(fetchFn).toHaveBeenCalledTimes(4);
+  });
+
+  it("兄弟が 50 個でも判定し、100 件ずつまとめて取得する", async () => {
+    const child = { ...product, parentAsin: "B0PARENT", monthlySold: 100 };
+    const variations = [{ asin: "B0TEST0001" }, ...Array.from({ length: MAX_VARIATIONS_TO_CHECK - 1 }, (_, i) => ({ asin: `B0V${i}` }))];
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const params = new URL(String(input)).searchParams;
+      if (params.get("code")) return json({ products: [child] });
+      if (params.get("asin") === "B0PARENT") return json({ products: [{ asin: "B0PARENT", variations }] });
+      return json({ products: params.get("asin")!.split(",").map((asin) => ({ asin, monthlySold: 50 })) });
+    });
+    const result = await lookupKeepa(JAN, "k", fetchFn, () => NOW_MS);
+    expect(MAX_VARIATIONS_TO_CHECK).toBe(50);
+    // 100 ÷ (100 + 49 × 50) = 3.9%
+    expect(result.product).toMatchObject({ variationCount: 50, variationSharePercent: 3.9 });
+    expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 
   it("バリエーションが多すぎるときは兄弟を調べない（トークン節約）", async () => {
