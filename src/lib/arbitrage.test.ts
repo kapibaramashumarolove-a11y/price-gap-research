@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { amazonTurnoverRank, analyzeJan, pickBestRoute, bestBuyOption, sellFees, sellPriceOn, turnoverRankFromSalesRank } from "./arbitrage";
+import { amazonRisks, amazonSellPrice, amazonTurnoverRank, analyzeJan, pickBestRoute, bestBuyOption, sellFees, sellPriceOn, turnoverRankFromSalesRank } from "./arbitrage";
 import { DEFAULT_ARBITRAGE_SETTINGS, type ArbitrageSettings, type JanLookup, type MallOffer } from "./malls";
 
 function offer(o: Partial<MallOffer> & Pick<MallOffer, "mall" | "priceJpy">): MallOffer {
@@ -80,15 +80,68 @@ describe("turnoverRankFromSalesRank", () => {
 });
 
 describe("amazonTurnoverRank", () => {
-  it("月の販売回数（Keepa のランキング上昇回数・Amazon の購入数の大きい方）があればそれで決める", () => {
+  it("月の販売数（S: 10 個以上・A: 3〜9・B: 1〜2・C: 実績なし）があればそれで決める", () => {
     const p = { asin: "B0", title: "x", url: "", salesRank: 500 };
-    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 25 })).toBe("S");
-    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 3, monthlySold: 10 })).toBe("A");
-    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 1 })).toBe("C");
+    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 10 })).toBe("S");
+    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 2, monthlySold: 5 })).toBe("A");
+    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 2 })).toBe("B");
+    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 0, salesRankDrops90: 0 })).toBe("C");
     // 90 日の回数 ÷ 3 も見る（30 日がたまたま少ないとき）
-    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 1, salesRankDrops90: 30 })).toBe("A");
+    expect(amazonTurnoverRank({ ...p, salesRankDrops30: 1, salesRankDrops90: 12 })).toBe("A");
     expect(amazonTurnoverRank(p)).toBe("S");
     expect(amazonTurnoverRank(undefined)).toBe("unknown");
+  });
+});
+
+describe("amazonSellPrice（保守的な販売価格）", () => {
+  const p = { asin: "B0", title: "x", url: "" };
+  const on = { safePrice: true, fbaPremiumPercent: 5 };
+
+  it("現在のカート価格と 90 日平均の低い方を使う", () => {
+    expect(amazonSellPrice({ ...p, buyBoxPriceJpy: 12000, buyBoxAvg90Jpy: 10000 }, on)?.priceJpy).toBe(10000);
+    expect(amazonSellPrice({ ...p, buyBoxPriceJpy: 9000, buyBoxAvg90Jpy: 10000 }, on)?.priceJpy).toBe(9000);
+    expect(amazonSellPrice({ ...p, buyBoxPriceJpy: 12000, buyBoxAvg90Jpy: 10000 }, { ...on, safePrice: false })?.priceJpy).toBe(12000);
+  });
+
+  it("カートが自己発送なら FBA プレミアムを足す（FBA 最安値は超えない・最大 10%）", () => {
+    expect(amazonSellPrice({ ...p, buyBoxPriceJpy: 10000, buyBoxIsFba: false }, on)?.priceJpy).toBe(10500);
+    expect(amazonSellPrice({ ...p, buyBoxPriceJpy: 10000, buyBoxIsFba: false, lowestFbaPriceJpy: 10300 }, on)?.priceJpy).toBe(10300);
+    expect(amazonSellPrice({ ...p, buyBoxPriceJpy: 10000, buyBoxIsFba: false }, { ...on, fbaPremiumPercent: 30 })?.priceJpy).toBe(11000);
+    expect(amazonSellPrice({ ...p, buyBoxPriceJpy: 10000, buyBoxIsFba: true }, on)?.priceJpy).toBe(10000);
+    // 安全値（90 日平均）に対してプレミアムを足す
+    const both = amazonSellPrice({ ...p, buyBoxPriceJpy: 12000, buyBoxAvg90Jpy: 10000, buyBoxIsFba: false }, on)!;
+    expect(both.priceJpy).toBe(10500);
+    expect(both.notes).toHaveLength(2);
+  });
+});
+
+describe("amazonRisks", () => {
+  const p = { asin: "B0", title: "x", url: "" };
+  const s = DEFAULT_ARBITRAGE_SETTINGS;
+  const codes = (product: Parameters<typeof amazonRisks>[0]) => amazonRisks(product, s).map((r) => `${r.code}:${r.level}`);
+
+  it("出品者が 7〜14 日で 30% 以上（2 人以上）増えたら危険", () => {
+    expect(codes({ ...p, offerCount: 13, offerCount7dAgo: 10 })).toEqual(["offerSurge:danger"]);
+    expect(codes({ ...p, offerCount: 13, offerCount7dAgo: 12, offerCount14dAgo: 9 })).toEqual(["offerSurge:danger"]);
+    expect(codes({ ...p, offerCount: 12, offerCount7dAgo: 10 })).toEqual([]);
+    // 1 → 2 人のような少人数の増加は数えない
+    expect(codes({ ...p, offerCount: 2, offerCount7dAgo: 1 })).toEqual([]);
+  });
+
+  it("Amazon 本体がよくカートを取っていて今いないなら危険、今いるなら注意", () => {
+    expect(codes({ ...p, amazonBuyBoxShare90: 45, amazonOutOfStock90: 30, amazonSelling: false })).toEqual(["amazonReturn:danger"]);
+    expect(codes({ ...p, amazonBuyBoxShare90: 5, amazonOutOfStock90: 95, amazonSelling: false })).toEqual([]);
+    expect(codes({ ...p, amazonBuyBoxShare90: 60, amazonSelling: true })).toEqual(["amazonSelling:caution"]);
+  });
+
+  it("バリエーションのシェアが低ければ危険、判定できなければ注意", () => {
+    expect(codes({ ...p, variationCount: 8, variationSharePercent: 4, variationShareBasis: "sold" })).toEqual(["variation:danger"]);
+    expect(codes({ ...p, variationCount: 8, variationSharePercent: 35 })).toEqual([]);
+    expect(codes({ ...p, variationCount: 40 })).toEqual(["manyVariations:caution"]);
+  });
+
+  it("カート価格が 90 日平均より 20% 以上高ければ注意", () => {
+    expect(codes({ ...p, buyBoxPriceJpy: 13000, buyBoxAvg90Jpy: 10000 })).toEqual(["priceSpike:caution"]);
   });
 });
 
@@ -123,6 +176,23 @@ describe("analyzeJan", () => {
     // Amazon は出品がない（仕入れ先にならない）
     expect(routes.some((r) => r.buy === "amazon")).toBe(false);
     expect(routes.map((r) => r.profitJpy)).toEqual([...routes.map((r) => r.profitJpy)].sort((a, b) => b - a));
+  });
+
+  it("危険なリスクがある Amazon 販売ルートは推奨から外し、安全なルートを選ぶ", () => {
+    const risky = lookup({ amazon: { ...lookup().amazon!, offerCount: 20, offerCount7dAgo: 10 } });
+    const { best, routes } = analyzeJan(risky, settings);
+    const toAmazon = routes.find((r) => r.buy === "yahoo" && r.sell === "amazon")!;
+    expect(toAmazon).toMatchObject({ blockedByRisk: true, isTreasure: false });
+    expect(toAmazon.risks.map((r) => r.code)).toEqual(["offerSurge"]);
+    expect(best?.sell).not.toBe("amazon");
+    // 外さない設定なら、リスクを表示したまま推奨にする
+    expect(analyzeJan(risky, { ...settings, excludeRisky: false }).best).toMatchObject({ buy: "yahoo", sell: "amazon", isTreasure: true });
+  });
+
+  it("Keepa の手数料率と FBA 配送代行手数料があれば、実際の販売価格で手数料を計算する", () => {
+    const keepa = lookup({ amazon: { ...lookup().amazon!, referralFeePercent: 8, fbaPickAndPackJpy: 400 } });
+    // 15,000 × 8% + 400 = 1,600
+    expect(sellFees(keepa, "amazon", 15000, settings)).toEqual({ feesJpy: 1600, fromApi: true });
   });
 
   it("販売しないモールはルートに含めない", () => {

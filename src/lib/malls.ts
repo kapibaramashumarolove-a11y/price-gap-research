@@ -53,6 +53,22 @@ export type AmazonProduct = {
   buyBoxIsFba?: boolean;
   /** カートを取っている価格（送料込み）[円] */
   buyBoxPriceJpy?: number;
+  /** カート価格の 90 日平均（送料込み）[円]（Keepa） */
+  buyBoxAvg90Jpy?: number;
+  /** 新品の出品者数の 7 日前・14 日前の値（Keepa の履歴） */
+  offerCount7dAgo?: number;
+  offerCount14dAgo?: number;
+  /** 過去 90 日で Amazon 本体がカートを取っていた割合 [%]（Keepa） */
+  amazonBuyBoxShare90?: number;
+  /** 過去 90 日で Amazon 本体が在庫切れだった割合 [%]（Keepa） */
+  amazonOutOfStock90?: number;
+  /** バリエーション（色・サイズ）の数と、この ASIN の売れ筋シェア [%]（Keepa。sold: 購入数、reviews: レビュー数で計算） */
+  variationCount?: number;
+  variationSharePercent?: number;
+  variationShareBasis?: "sold" | "reviews";
+  /** 販売手数料率 [%] と FBA 配送代行手数料 [円]（Keepa。販売価格を変えても手数料を計算し直せる） */
+  referralFeePercent?: number;
+  fbaPickAndPackJpy?: number;
   /** FBA の新品の最安値（送料込み）[円] */
   lowestFbaPriceJpy?: number;
   /** 新品の最安値（送料込み・出品者発送も含む）[円] */
@@ -110,6 +126,18 @@ export type ArbitrageSettings = {
   minMarginPercent: number;
   /** お宝にする回転率ランクの下限（none: 問わない） */
   minRank: MinRank;
+  /** Amazon の販売価格を「現在のカート価格」と「90 日平均」の低い方にする（一時的な高騰で仕入れない） */
+  safePrice: boolean;
+  /** カートを自己発送（FBM）が持っているとき、FBA で出品する価格をカート価格の何 % 上で見込むか（0〜10） */
+  fbaPremiumPercent: number;
+  /** 新品出品者数が 7〜14 日でこの割合 [%] 以上増えたら「出品者急増（値崩れ）」 */
+  offerSurgePercent: number;
+  /** 過去 90 日で Amazon 本体がこの割合 [%] 以上カートを取っていて、今いないなら「Amazon 本体の復帰」 */
+  amazonReturnSharePercent: number;
+  /** バリエーションの売れ筋シェアがこの割合 [%] 未満なら「不人気バリエーション」 */
+  variationMinSharePercent: number;
+  /** 危険（赤）のリスクがある Amazon 販売ルートを推奨から外す */
+  excludeRisky: boolean;
 };
 
 export const DEFAULT_ARBITRAGE_SETTINGS: ArbitrageSettings = {
@@ -125,6 +153,26 @@ export const DEFAULT_ARBITRAGE_SETTINGS: ArbitrageSettings = {
   minProfitJpy: 1000,
   minMarginPercent: 10,
   minRank: "none",
+  safePrice: true,
+  fbaPremiumPercent: 5,
+  offerSurgePercent: 30,
+  amazonReturnSharePercent: 20,
+  variationMinSharePercent: 10,
+  excludeRisky: true,
+};
+
+// ---- リスク（Amazon で販売するときの注意） ----
+
+export type RiskCode = "offerSurge" | "amazonReturn" | "variation" | "manyVariations" | "amazonSelling" | "priceSpike";
+
+export type Risk = {
+  code: RiskCode;
+  /** danger: 推奨から外す（設定で外さないこともできる） / caution: 注意だけ */
+  level: "danger" | "caution";
+  /** バッジに出す短い言葉 */
+  label: string;
+  /** 理由（数字つき） */
+  detail: string;
 };
 
 // ---- 回転率ランク（Amazon の売れ筋ランキングから） ----
@@ -140,9 +188,9 @@ export const MIN_RANKS: { id: MinRank; label: string }[] = [
 ];
 
 export const RANK_INFO: Record<TurnoverRank, { label: string; hint: string }> = {
-  S: { label: "S", hint: "即売れ（月 20 回以上売れている。販売回数が分からなければランキング 5,000 位以内）" },
-  A: { label: "A", hint: "高回転（月 8 回以上。またはランキング 3 万位以内）" },
-  B: { label: "B", hint: "中回転（月 2 回以上。またはランキング 10 万位以内）" },
-  C: { label: "C", hint: "低回転（月 2 回未満。またはランキング 10 万位より下）" },
+  S: { label: "S", hint: "即売れ（月 10 個以上。販売数が分からなければランキング 5,000 位以内）" },
+  A: { label: "A", hint: "高回転（月 3〜9 個。またはランキング 3 万位以内）" },
+  B: { label: "B", hint: "中回転（月 1〜2 個。またはランキング 10 万位以内）" },
+  C: { label: "C", hint: "低回転（販売実績なし。またはランキング 10 万位より下）" },
   unknown: { label: "?", hint: "回転率が分からない（Amazon 以外で販売、またはランキングなし）" },
 };

@@ -17,7 +17,23 @@ export function amazonSource(env: Record<string, string | undefined> = process.e
       const [sp, keepa] = await Promise.all([lookupAmazon(jan, spApi), lookupKeepa(jan, keepaKey).catch(() => undefined)]);
       const k = keepa?.product;
       if (sp.product && k && k.asin === sp.product.asin) {
-        sp.product = { ...sp.product, salesRankDrops30: k.salesRankDrops30, salesRankDrops90: k.salesRankDrops90, monthlySold: k.monthlySold, amazonSelling: k.amazonSelling };
+        // 価格・ポイント・手数料は SP-API、売れ行きとリスク判定のデータは Keepa
+        sp.product = {
+          ...sp.product,
+          salesRankDrops30: k.salesRankDrops30,
+          salesRankDrops90: k.salesRankDrops90,
+          monthlySold: k.monthlySold,
+          amazonSelling: k.amazonSelling,
+          buyBoxIsFba: k.buyBoxIsFba,
+          buyBoxAvg90Jpy: k.buyBoxAvg90Jpy,
+          offerCount7dAgo: k.offerCount7dAgo,
+          offerCount14dAgo: k.offerCount14dAgo,
+          amazonBuyBoxShare90: k.amazonBuyBoxShare90,
+          amazonOutOfStock90: k.amazonOutOfStock90,
+          variationCount: k.variationCount,
+          variationSharePercent: k.variationSharePercent,
+          variationShareBasis: k.variationShareBasis,
+        };
       }
       return sp;
     };

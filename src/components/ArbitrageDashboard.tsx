@@ -22,6 +22,7 @@ import {
   type Mall,
   type MallOffer,
   type MinRank,
+  type Risk,
   type TurnoverRank,
 } from "@/lib/malls";
 import { fetchRakuten, fetchRakutenRanking, type RakutenCredentials, type RakutenResult } from "@/lib/rakuten";
@@ -667,6 +668,42 @@ function SettingsPanel({ settings, onChange }: { settings: ArbitrageSettings; on
         </fieldset>
 
         <fieldset className="space-y-2">
+          <legend className="mb-1 text-sm font-semibold">Amazon の販売価格・リスク判定（Keepa）</legend>
+          <label className="flex min-h-11 items-center gap-2 text-sm">
+            <input type="checkbox" checked={settings.safePrice} onChange={(e) => set({ safePrice: e.target.checked })} className="h-5 w-5" />
+            カート価格と 90 日平均の低い方で計算する（安全値）
+          </label>
+          <label className="flex min-h-11 items-center gap-2 text-sm">
+            <input type="checkbox" checked={settings.excludeRisky} onChange={(e) => set({ excludeRisky: e.target.checked })} className="h-5 w-5" />
+            危険（赤）のリスクがある商品は推奨から外す
+          </label>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <NumberSetting
+              label="FBA プレミアム（%・最大 10）"
+              value={settings.fbaPremiumPercent}
+              onCommit={(n) => set({ fbaPremiumPercent: Math.min(10, n) })}
+            />
+            <NumberSetting label="出品者急増（7〜14日で%以上）" value={settings.offerSurgePercent} onCommit={(n) => set({ offerSurgePercent: n })} />
+            <NumberSetting
+              label="Amazon本体のカート獲得（90日で%以上）"
+              value={settings.amazonReturnSharePercent}
+              onCommit={(n) => set({ amazonReturnSharePercent: n })}
+            />
+            <NumberSetting
+              label="不人気バリエーション（シェア%未満）"
+              value={settings.variationMinSharePercent}
+              onCommit={(n) => set({ variationMinSharePercent: n })}
+            />
+          </div>
+          <p className="text-xs opacity-60">
+            FBA プレミアム: カートを自己発送の出品者が持っているとき、FBA なら数 % 高くてもカートを取れるので、その分を販売価格に上乗せします（FBA の最安値は超えません）。
+            出品者急増: 楽天・Yahoo! のセール後などに新品出品者が急に増えた商品は値崩れしやすいので外します。
+            Amazon本体の復帰: 過去 90 日に Amazon 本体がよくカートを取っていて今だけ在庫切れの商品は、補充されると売れなくなるので外します。
+            不人気バリエーション: 色・サイズ違いの中でこの商品の購入数（なければレビュー数）のシェアが低いものを外します。
+          </p>
+        </fieldset>
+
+        <fieldset className="space-y-2">
           <legend className="mb-1 text-sm font-semibold">仕入れ（ポイント・送料）</legend>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
             {MALLS.map((m) => (
@@ -719,7 +756,7 @@ function SettingsPanel({ settings, onChange }: { settings: ArbitrageSettings; on
             </div>
           ))}
           <p className="text-xs opacity-60">
-            Amazon の手数料（販売手数料＋FBA 配送代行手数料）は SP-API で商品ごとに見積もります。楽天・Yahoo! の手数料は、
+            Amazon の手数料（販売手数料＋FBA 配送代行手数料）は Keepa（または SP-API）のデータで商品ごとに計算します。楽天・Yahoo! の手数料は、
             システム利用料・決済手数料・ポイント原資などを合計した割合を入れてください。出店していないモールはチェックを外します。
           </p>
         </fieldset>
@@ -776,23 +813,77 @@ function BestRoute({ best }: { best: Route | undefined }) {
   }
   const good = best.isTreasure;
   const positive = best.profitJpy > 0;
+  const heading = good
+    ? "[推奨] 最適ルート"
+    : best.blockedByRisk
+      ? "最適ルート（リスクありのため推奨外）"
+      : positive
+        ? "最適ルート（条件未達）"
+        : "最適ルート（利益なし）";
   return (
     <div
       className={`rounded-lg p-3 ${
-        good ? "bg-green-600 text-white" : positive ? "border-2 border-amber-500/70" : "border border-black/15 dark:border-white/20"
+        good
+          ? "bg-green-600 text-white"
+          : best.blockedByRisk
+            ? "border-2 border-red-500/70"
+            : positive
+              ? "border-2 border-amber-500/70"
+              : "border border-black/15 dark:border-white/20"
       }`}
     >
-      <div className="text-xs font-semibold opacity-90">{good ? "★ 最適ルート（条件クリア）" : positive ? "最適ルート（条件未達）" : "最適ルート（利益なし）"}</div>
+      <div className="text-xs font-semibold opacity-90">{heading}</div>
       <div className="text-base font-bold break-words">{routeLabel(best)}</div>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-sm">
-        <span className={`text-lg font-bold ${good ? "" : positive ? "text-green-600" : "text-red-600"}`}>利益 {yen.format(best.profitJpy)}</span>
-        <span>（{best.marginPercent.toFixed(1)}%）</span>
-        <span>／ {RANK_WORD[best.rank]}</span>
+        <span className={`text-lg font-bold ${good ? "" : positive ? "text-green-600" : "text-red-600"}`}>見込み利益 {yen.format(best.profitJpy)}</span>
+        <span>（利益率 {best.marginPercent.toFixed(1)}%）</span>
+        <span>／ 回転率</span>
         <span className={`rounded px-1.5 text-xs font-bold ${good ? "bg-white text-green-700" : RANK_STYLE[best.rank]}`} title={RANK_INFO[best.rank].hint}>
           {RANK_INFO[best.rank].label}
         </span>
+        <span>{RANK_WORD[best.rank]}</span>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-1 text-sm">
+        <span>リスク:</span>
+        {best.risks.length === 0 ? <span className="font-semibold">なし</span> : <RiskBadges risks={best.risks} onDark={good} />}
       </div>
     </div>
+  );
+}
+
+/** リスクのバッジ（危険は赤、注意は黄） */
+function RiskBadges({ risks, onDark = false }: { risks: Risk[]; onDark?: boolean }) {
+  return (
+    <>
+      {risks.map((r) => (
+        <span
+          key={r.code}
+          title={r.detail}
+          className={`rounded px-1.5 py-0.5 text-xs font-bold ${
+            r.level === "danger" ? "bg-red-600 text-white" : onDark ? "bg-white text-amber-700" : "bg-amber-400 text-black"
+          }`}
+        >
+          {r.level === "danger" ? "⛔" : "⚠"} {r.label}
+        </span>
+      ))}
+    </>
+  );
+}
+
+/** Amazon で売るときのリスクの説明 */
+function RiskList({ risks }: { risks: Risk[] }) {
+  if (risks.length === 0) return null;
+  return (
+    <ul className="space-y-1 rounded-lg border border-red-500/40 p-3 text-xs">
+      {risks.map((r) => (
+        <li key={r.code}>
+          <span className={`font-bold ${r.level === "danger" ? "text-red-600" : "text-amber-700 dark:text-amber-400"}`}>
+            {r.level === "danger" ? "⛔" : "⚠"} {r.label}
+          </span>
+          ：{r.detail}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -852,7 +943,18 @@ function RouteSummary({ rows }: { rows: Row[] }) {
                 </span>
                 <span className="shrink-0 text-right">
                   <span className={`block font-bold ${best.isTreasure ? "text-green-600" : ""}`}>{yen.format(best.profitJpy)}</span>
-                  <span className="block text-xs opacity-60">{RANK_WORD[best.rank]}</span>
+                  <span className="block text-xs opacity-60">
+                    {best.marginPercent.toFixed(0)}% ・ {RANK_WORD[best.rank]}
+                  </span>
+                  <span className="block text-xs">
+                    {best.risks.length === 0 ? (
+                      <span className="opacity-60">リスクなし</span>
+                    ) : (
+                      <span className={best.risks.some((r) => r.level === "danger") ? "font-semibold text-red-600" : "text-amber-700 dark:text-amber-400"}>
+                        {best.risks.some((r) => r.level === "danger") ? "⛔" : "⚠"} {best.risks.map((r) => r.label).join("・")}
+                      </span>
+                    )}
+                  </span>
                 </span>
               </a>
             </li>
@@ -892,6 +994,21 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
       </div>
 
       <BestRoute best={best} />
+      {(() => {
+        // 最適ルートより利益が大きいのに、リスクで外したルート（なぜ選ばれなかったかを見せる）
+        const blocked = analysis.routes.filter((r) => r.blockedByRisk && r.profitJpy > 0 && r !== best && r.profitJpy > (best?.profitJpy ?? -Infinity));
+        if (blocked.length === 0) return null;
+        const top = blocked[0];
+        return (
+          <p className="rounded-lg border border-red-500/50 p-2 text-xs">
+            <span className="font-semibold text-red-600">⛔ リスクで除外:</span> {routeLabel(top)}（見込み利益 {yen.format(top.profitJpy)}）—{" "}
+            {top.risks
+              .filter((r) => r.level === "danger")
+              .map((r) => r.label)
+              .join("・")}
+          </p>
+        );
+      })()}
 
       {best && (
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
@@ -909,9 +1026,11 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
             {yen.format(best.sellPriceJpy)}
             <span className="block text-xs opacity-60">
               {best.sell === "amazon"
-                ? amazon?.buyBoxPriceJpy === best.sellPriceJpy
-                  ? "Amazon のカート価格"
-                  : "Amazon の FBA 最安値"
+                ? best.sellPriceNotes.length > 0
+                  ? best.sellPriceNotes.join(" ・ ")
+                  : amazon?.buyBoxPriceJpy === best.sellPriceJpy
+                    ? "Amazon のカート価格"
+                    : "Amazon の FBA 最安値"
                 : `${SELL_LABEL[best.sell]}の最安値`}{" "}
               ・ 手数料 −{yen.format(best.sellFeesJpy)}
               {best.sell === "amazon" && (best.feesFromApi ? "（販売手数料＋FBA 手数料）" : "（設定の割合）")} ・ 送料 −{yen.format(best.sellShippingJpy)}
@@ -921,6 +1040,7 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
       )}
 
       {amazon && <SalesVelocity amazon={amazon} rank={analysis.amazonRank} />}
+      <RiskList risks={analysis.amazonRisks} />
 
       {/* 3 モールの価格と在庫 */}
       <div className="divide-y divide-black/10 rounded-lg border border-black/10 text-sm dark:divide-white/15 dark:border-white/15">
@@ -988,7 +1108,10 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
             <tbody>
               {analysis.routes.map((r) => (
                 <tr key={`${r.buy}-${r.sell}`} className="border-t border-black/10 dark:border-white/15">
-                  <td className="py-2">{routeLabel(r)}</td>
+                  <td className="py-2">
+                    {routeLabel(r)}
+                    {r.blockedByRisk && <span className="ml-1 font-semibold text-red-600">⛔ リスクで除外</span>}
+                  </td>
                   <td className={`py-2 text-right font-semibold ${r.profitJpy >= 0 ? "text-green-600" : "text-red-600"}`}>{yen.format(r.profitJpy)}</td>
                   <td className="py-2 text-right opacity-70">{r.marginPercent.toFixed(1)}%</td>
                 </tr>
