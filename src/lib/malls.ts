@@ -97,6 +97,8 @@ export type JanLookup = {
   excludedSets: number;
   /** 中古・開封品・訳ありなど、新品ではないため除いた出品数（古い結果にはない） */
   excludedUsed?: number;
+  /** 調べた直後の Keepa の残りトークンと 1 分あたりの回復量 */
+  keepaTokens?: { left: number; refillPerMinute?: number };
   fetchedAt: string;
 };
 

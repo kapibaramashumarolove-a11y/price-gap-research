@@ -170,6 +170,28 @@ describe("lookupKeepa", () => {
     expect(result.product?.variationSharePercent).toBeUndefined();
   });
 
+  it("トークンに余裕がないときはバリエーション判定を省略し、残りトークンを返す", async () => {
+    const child = { ...product, parentAsin: "B0PARENT" };
+    const variations = Array.from({ length: 30 }, (_, i) => ({ asin: i === 0 ? "B0TEST0001" : `B0V${i}` }));
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const params = new URL(String(input)).searchParams;
+      // 残り 25 トークン → 予備 20 を引くと 5。親（1）は取れるが、兄弟 29 個は取らない
+      if (params.get("code")) return json({ products: [child], tokensLeft: 25, refillRate: 5 });
+      return json({ products: [{ asin: "B0PARENT", variations }], tokensLeft: 24, refillRate: 5 });
+    });
+    const result = await lookupKeepa(JAN, "k", fetchFn, () => NOW_MS);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(result.product).toMatchObject({ variationCount: 30 });
+    expect(result.product?.variationSharePercent).toBeUndefined();
+    expect(result.warnings.some((w) => w.includes("バリエーション判定は省略"))).toBe(true);
+    expect(result.keepaTokens).toEqual({ left: 24, refillPerMinute: 5 });
+
+    // 予備以下なら親も取らない
+    const poor = vi.fn<typeof fetch>(async () => json({ products: [child], tokensLeft: 10, refillRate: 5 }));
+    await lookupKeepa(JAN, "k", poor, () => NOW_MS);
+    expect(poor).toHaveBeenCalledTimes(1);
+  });
+
   it("トークン不足・キー違いは、キーや URL を含まない日本語のエラーにする", async () => {
     const tokens = await lookupKeepa(JAN, "secret-key", vi.fn<typeof fetch>(async () => json({ tokensLeft: -3, refillIn: 42000 }, 429))).catch((e) => e);
     expect(tokens).toBeInstanceOf(KeepaApiError);

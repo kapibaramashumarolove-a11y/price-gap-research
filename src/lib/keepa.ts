@@ -86,6 +86,8 @@ type KeepaProduct = {
 type KeepaResponse = {
   products?: KeepaProduct[];
   tokensLeft?: number;
+  /** 1 分あたりに回復するトークン数 */
+  refillRate?: number;
   refillIn?: number;
   error?: { type?: string; message?: string };
 };
@@ -225,6 +227,8 @@ async function keepaRequest(params: Record<string, string>, key: string, fetchFn
 
 /** 1 回のリクエストで送れる ASIN の数（Keepa の上限） */
 const KEEPA_BATCH_SIZE = 100;
+/** バリエーション判定のあとにも残しておくトークン（ほかの商品の比較に回す分） */
+export const VARIATION_TOKEN_RESERVE = 20;
 /** 同じ親 ASIN のバリエーション情報を使い回す時間（同じ商品の色違いを続けて調べてもトークンを使わない） */
 const VARIATION_CACHE_MS = 6 * 60 * 60 * 1000;
 
@@ -257,18 +261,30 @@ async function checkVariations(
   key: string,
   fetchFn: typeof fetch,
   now: number,
-): Promise<Pick<AmazonProduct, "variationCount" | "variationSharePercent" | "variationShareBasis">> {
+  /** バリエーション判定に使ってよいトークン数（残りトークン − 予備）。足りなければ判定しない */
+  budget: number,
+  onTokens: (data: KeepaResponse) => void,
+): Promise<Pick<AmazonProduct, "variationCount" | "variationSharePercent" | "variationShareBasis"> & { skippedForTokens?: boolean }> {
   const selfAsin = self.asin ?? "";
   let cached = variationCache.get(parentAsin);
   if (!cached || now - cached.at > VARIATION_CACHE_MS) {
-    const parent = (await keepaRequest({ asin: parentAsin, history: "0" }, key, fetchFn)).products?.[0];
+    // 親 ASIN の取得にも 1 トークン使う
+    if (budget < 1) return { skippedForTokens: true };
+    const parentData = await keepaRequest({ asin: parentAsin, history: "0" }, key, fetchFn);
+    onTokens(parentData);
+    const parent = parentData.products?.[0];
     const siblings = [...new Set((parent?.variations ?? []).map((v) => v.asin).filter((a): a is string => !!a))];
+    const others = siblings.filter((a) => a !== selfAsin);
+    if (siblings.length > 1 && siblings.length <= MAX_VARIATIONS_TO_CHECK && others.length > budget - 1) {
+      // 兄弟の分のトークンが足りない。今回は判定せず、使い回し用にも残さない（次に余裕があるときに判定する）
+      return { variationCount: siblings.length, skippedForTokens: true };
+    }
     const metrics = new Map<string, VariationMetrics>();
     if (siblings.length > 1 && siblings.length <= MAX_VARIATIONS_TO_CHECK) {
-      const others = siblings.filter((a) => a !== selfAsin);
       for (let i = 0; i < others.length; i += KEEPA_BATCH_SIZE) {
         // 購入数（monthlySold）とレビュー数（stats.current）だけ使うので、集計は最小の 1 日・履歴なし
         const data = await keepaRequest({ asin: others.slice(i, i + KEEPA_BATCH_SIZE).join(","), stats: "1", history: "0" }, key, fetchFn);
+        onTokens(data);
         for (const p of data.products ?? []) if (p.asin) metrics.set(p.asin, metricsOf(p));
       }
     }
@@ -313,16 +329,28 @@ export async function lookupKeepa(jan: string, key: string, fetchFn: typeof fetc
   const result = parseKeepaProduct(best, now());
   if (products.length > 1) result.warnings.push(`Amazon: この JAN に ${products.length} 件の商品ページがあります（一番売れている ${best.asin} で計算）。`);
 
+  let tokens = typeof data.tokensLeft === "number" ? { left: data.tokensLeft, refillPerMinute: data.refillRate } : undefined;
+  const onTokens = (d: KeepaResponse) => {
+    if (typeof d.tokensLeft === "number") tokens = { left: d.tokensLeft, refillPerMinute: d.refillRate ?? tokens?.refillPerMinute };
+  };
+
   if (best.parentAsin && result.product) {
     try {
-      Object.assign(result.product, await checkVariations(best, best.parentAsin, key, fetchFn, now()));
+      // 残りトークンが分からなければ（古いプランなど）上限まで使ってよいとみなす
+      const budget = tokens ? tokens.left - VARIATION_TOKEN_RESERVE : MAX_VARIATIONS_TO_CHECK + 1;
+      const { skippedForTokens, ...variation } = await checkVariations(best, best.parentAsin, key, fetchFn, now(), budget, onTokens);
+      Object.assign(result.product, variation);
+      if (skippedForTokens) {
+        result.warnings.push("Amazon（Keepa）: トークン節約のため、この商品のバリエーション判定は省略しました（トークンに余裕があるときに「調べ直す」と判定します）。");
+      }
     } catch (e) {
       result.warnings.push(e instanceof KeepaApiError ? `${e.message}（バリエーションの確認）` : "Amazon（Keepa）: バリエーションを確認できませんでした。");
     }
   }
-  if (typeof data.tokensLeft === "number" && data.tokensLeft < 5) {
-    result.warnings.push(`Amazon（Keepa）: 残りトークンが少なくなっています（${data.tokensLeft}）。`);
+  if (tokens && tokens.left < 5) {
+    result.warnings.push(`Amazon（Keepa）: 残りトークンが少なくなっています（${tokens.left}）。`);
   }
+  result.keepaTokens = tokens;
   return result;
 }
 

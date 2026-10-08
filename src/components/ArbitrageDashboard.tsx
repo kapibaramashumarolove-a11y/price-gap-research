@@ -53,6 +53,35 @@ const RANK_SORT: Record<TurnoverRank, number> = { S: 4, A: 3, B: 2, C: 1, unknow
 
 type BulkOptions = { sources: DiscoverySource[]; category: DiscoveryCategory; limit: number };
 const DEFAULT_BULK: BulkOptions = { sources: ["keepa", "yahoo"], category: "all", limit: 20 };
+/** 途中で止まったリサーチの続き（画面を閉じても、開き直すと再開できるように保存） */
+const QUEUE_KEY = "price-gap:research-queue";
+const SKIP_RECENT_KEY = "price-gap:skip-recent";
+/** 「最近調べた商品は飛ばす」の期間 [時間] */
+const RECENT_HOURS = 6;
+type Queue = { jans: string[]; next: number; savedAt: string };
+
+/** 調べている間、画面が自動で消えないようにする（Screen Wake Lock。対応していないブラウザでは何もしない） */
+function keepScreenOn(): () => void {
+  type Sentinel = { release: () => Promise<void> };
+  const nav = navigator as Navigator & { wakeLock?: { request: (type: "screen") => Promise<Sentinel> } };
+  if (!nav.wakeLock) return () => {};
+  let sentinel: Sentinel | undefined;
+  let active = true;
+  const acquire = () => {
+    if (active && document.visibilityState === "visible") {
+      nav.wakeLock!.request("screen").then((s) => (sentinel = s)).catch(() => {});
+    }
+  };
+  // 別のアプリから戻ってきたら取り直す（iPhone はアプリを切り替えると解除される）
+  document.addEventListener("visibilitychange", acquire);
+  acquire();
+  return () => {
+    active = false;
+    document.removeEventListener("visibilitychange", acquire);
+    sentinel?.release().catch(() => {});
+  };
+}
+
 /** Keepa のトークン不足のとき、回復を待つ最大時間 [ミリ秒] */
 const MAX_TOKEN_WAIT_MS = 5 * 60 * 1000;
 
@@ -134,6 +163,14 @@ export default function ArbitrageDashboard() {
   /** 最後の全自動リサーチで調べた JAN（結果を「今回の分だけ」に絞るため） */
   const [lastBulkJans, setLastBulkJans] = useState<string[]>([]);
   const [onlyLastBulk, setOnlyLastBulk] = useState(false);
+  const [skipRecent, setSkipRecent] = useState<boolean>(() => loadJson<boolean>(SKIP_RECENT_KEY) ?? true);
+  /** 前回途中で止まったリサーチ（画面を閉じた・電波が切れたなど） */
+  const [pendingQueue, setPendingQueue] = useState<Queue | null>(() => {
+    const q = loadJson<Queue>(QUEUE_KEY);
+    return q && Array.isArray(q.jans) && q.next < q.jans.length ? q : null;
+  });
+  const [runNotice, setRunNotice] = useState("");
+  const [keepaTokens, setKeepaTokens] = useState<{ left: number; refillPerMinute?: number } | null>(null);
   const [showAllItems, setShowAllItems] = useState(false);
   const stopRequested = useRef(false);
   const rakutenCredentials = useRef<Promise<RakutenCredentials | null> | null>(null);
@@ -144,6 +181,7 @@ export default function ArbitrageDashboard() {
   useEffect(() => saveJson(ONLY_TREASURES_KEY, onlyTreasures), [onlyTreasures]);
   useEffect(() => saveJson(MODE_KEY, mode), [mode]);
   useEffect(() => saveJson(VIEW_KEY, view), [view]);
+  useEffect(() => saveJson(SKIP_RECENT_KEY, skipRecent), [skipRecent]);
 
   // 調べた JAN ごとに、今の設定で全ルートを計算し、一番利益の大きいルートの順に並べる
   const rows = useMemo(() => {
@@ -207,6 +245,7 @@ export default function ArbitrageDashboard() {
       }
       const result = body as JanLookup;
       setResults((prev) => ({ ...prev, [jan]: result }));
+      if (result.keepaTokens) setKeepaTokens(result.keepaTokens);
       // Keepa のトークン不足（Amazon だけ取れなかった）なら、回復を待ってやり直せるよう秒数を返す
       const tokenWarning = result.warnings.find((w) => w.includes("トークンが足りません"));
       if (tokenWarning) return Number(tokenWarning.match(/約 (\d+) 秒後/)?.[1] ?? 60);
@@ -219,11 +258,28 @@ export default function ArbitrageDashboard() {
    * JAN を 1 件ずつ順番に調べる（バッチ処理）。楽天の 1 秒 1 回の制限のため間を空け、
    * Keepa のトークンが足りなくなったら回復まで待って同じ JAN をやり直す（中止ボタンで止められる）
    */
-  async function runAll(jans: string[]) {
+  async function runAll(all: string[], options: { skipRecent?: boolean } = {}) {
+    // まとめて調べるときは、最近調べた商品を飛ばしてトークンを節約する（「調べる」「調べ直す」は必ず調べる）
+    const recentMs = RECENT_HOURS * 60 * 60 * 1000;
+    const jans =
+      options.skipRecent && skipRecent
+        ? all.filter((jan) => {
+            const fetched = results[jan]?.fetchedAt;
+            return !fetched || Date.now() - new Date(fetched).getTime() > recentMs;
+          })
+        : all;
+    const skipped = all.length - jans.length;
+    setRunNotice(skipped > 0 ? `${skipped} 件は ${RECENT_HOURS} 時間以内に調べ済みのため飛ばしました（トークン節約）。` : "");
+    if (jans.length === 0) return;
+
     stopRequested.current = false;
+    setPendingQueue(null);
+    const releaseScreen = keepScreenOn();
     for (const [index, jan] of jans.entries()) {
       // 「中止」が押されたら、今の JAN が終わったところで止める
       if (stopRequested.current) break;
+      // 画面を閉じても、開き直したときに続きから再開できるよう、どこまで進んだかを保存する
+      saveJson(QUEUE_KEY, { jans, next: index, savedAt: new Date().toISOString() } satisfies Queue);
       setRunning({ jan, index: index + 1, total: jans.length, jans });
       const started = Date.now();
       let refillSec = await lookup(jan);
@@ -239,6 +295,9 @@ export default function ArbitrageDashboard() {
       const rest = MIN_GAP_MS - (Date.now() - started);
       if (rest > 0 && index < jans.length - 1) await wait(rest);
     }
+    // 最後まで終わったか、自分で中止したときは続きを残さない
+    saveJson(QUEUE_KEY, null);
+    releaseScreen();
     setRunning(null);
   }
 
@@ -248,7 +307,7 @@ export default function ArbitrageDashboard() {
     const jans = found.map((i) => i.jan);
     setLastBulkJans(jans);
     setOnlyLastBulk(true);
-    await runAll(jans);
+    await runAll(jans, { skipRecent: true });
   }
 
   function addItems(added: JanItem[]) {
@@ -329,7 +388,32 @@ export default function ArbitrageDashboard() {
         <BulkResearch loadRakutenCredentials={loadRakutenCredentials} onStart={runBulk} busy={busy} />
       )}
 
-      {running && <RunProgress running={running} found={foundInRun} onStop={() => (stopRequested.current = true)} />}
+      {pendingQueue && !running && (
+        <div className="space-y-2 rounded-lg border-2 border-amber-500/70 p-3 text-sm" role="status">
+          <p>
+            前回のリサーチが途中で止まっています（{pendingQueue.jans.length} 件中 {pendingQueue.next} 件まで完了・残り{" "}
+            {pendingQueue.jans.length - pendingQueue.next} 件）。
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => void runAll(pendingQueue.jans.slice(pendingQueue.next))} className={PRIMARY}>
+              続きから再開
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                saveJson(QUEUE_KEY, null);
+                setPendingQueue(null);
+              }}
+              className={SECONDARY}
+            >
+              やめる
+            </button>
+          </div>
+        </div>
+      )}
+
+      {running && <RunProgress running={running} found={foundInRun} tokens={keepaTokens} onStop={() => (stopRequested.current = true)} />}
+      {runNotice && !running && <p className="text-xs opacity-70">{runNotice}</p>}
 
       {/* 登録した JAN */}
       <section className="space-y-3">
@@ -386,12 +470,21 @@ export default function ArbitrageDashboard() {
               </button>
             )}
             {!busy && (
-              <button type="button" onClick={() => void runAll(items.map((i) => i.jan))} className={`${PRIMARY} w-full sm:w-auto sm:px-8`}>
+              <button
+                type="button"
+                onClick={() => void runAll(items.map((i) => i.jan), { skipRecent: true })}
+                className={`${PRIMARY} w-full sm:w-auto sm:px-8`}
+              >
                 すべて調べる（{items.length}件）
               </button>
             )}
+            <label className="flex min-h-11 items-center gap-2 text-sm">
+              <input type="checkbox" checked={skipRecent} onChange={(e) => setSkipRecent(e.target.checked)} className="h-5 w-5" />
+              {RECENT_HOURS} 時間以内に調べた商品は飛ばす（Keepa のトークン節約）
+            </label>
             <p className="text-xs opacity-60">
-              1 件ずつ順番に調べます（Keepa はトークンを 1 件あたり 1 つ使います）。画面を開いたままにしてください。
+              スマホのブラウザの中で 1 件ずつ調べます。画面を閉じる・別のアプリに切り替えると止まりますが、開き直すと「続きから再開」できます。
+              調べている間は画面が自動で消えないようにしています。
             </p>
           </>
         )}
@@ -542,10 +635,12 @@ function ConnectionStatus() {
 function RunProgress({
   running,
   found,
+  tokens,
   onStop,
 }: {
   running: { jan: string; index: number; total: number; note?: string };
   found: number;
+  tokens: { left: number; refillPerMinute?: number } | null;
   onStop: () => void;
 }) {
   const percent = Math.round(((running.index - 1) / running.total) * 100);
@@ -571,6 +666,13 @@ function RunProgress({
       <div className="h-2 overflow-hidden rounded-full bg-black/10 dark:bg-white/15">
         <div className="h-full rounded-full bg-green-600 transition-[width]" style={{ width: `${percent}%` }} />
       </div>
+      {tokens && (
+        <div className={`text-xs ${tokens.left < 10 ? "font-semibold text-red-600" : "opacity-70"}`}>
+          Keepa 残り {tokens.left} トークン
+          {tokens.refillPerMinute ? `（1 分ごとに ${tokens.refillPerMinute} 回復）` : ""}
+        </div>
+      )}
+      <div className="text-xs opacity-60">画面を閉じると止まります（開き直すと続きから再開できます）。</div>
     </div>
   );
 }

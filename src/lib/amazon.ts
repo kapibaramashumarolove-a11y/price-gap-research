@@ -316,7 +316,13 @@ async function estimateFbaFees(asin: string, priceJpy: number, creds: AmazonCred
 
 // ---- まとめ: 1 つの JAN を Amazon で調べる ----
 
-export type AmazonLookup = { product?: AmazonProduct; offers: MallOffer[]; warnings: string[] };
+export type AmazonLookup = {
+  product?: AmazonProduct;
+  offers: MallOffer[];
+  warnings: string[];
+  /** Keepa の残りトークンと 1 分あたりの回復量（Keepa で調べたときだけ） */
+  keepaTokens?: { left: number; refillPerMinute?: number };
+};
 
 export async function lookupAmazon(jan: string, creds: AmazonCredentials, deps: AmazonDeps = {}): Promise<AmazonLookup> {
   const warnings: string[] = [];
