@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { historyValueAt, KeepaApiError, keepaMinuteToMs, lookupKeepa, MAX_VARIATIONS_TO_CHECK, readKeepaKey, resetKeepaCache } from "./keepa";
+import { historyValueAt, KeepaApiError, keepaMinuteToMs, lookupKeepa, MAX_VARIATIONS_TO_CHECK, readKeepaKey, resetKeepaCache, resetKeepaLookupCache } from "./keepa";
 
-beforeEach(() => resetKeepaCache());
+beforeEach(() => {
+  resetKeepaCache();
+  resetKeepaLookupCache();
+});
 
 const JAN = "4902370548495";
 /** テストの「今」（Keepa 時間で表す） */
@@ -137,8 +140,12 @@ describe("lookupKeepa", () => {
     expect(siblingsCall.get("history")).toBe("0");
     expect(fetchFn).toHaveBeenCalledTimes(3);
 
-    // 同じ親の商品をもう一度調べても、親・兄弟は取り直さない（6 時間使い回す）
+    // 同じ JAN をもう一度調べると、商品も親・兄弟も取り直さない（サーバー内のキャッシュ）
     await lookupKeepa(JAN, "k", fetchFn, () => NOW_MS + 60_000);
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    // 同じ親の別の色（別の JAN）は、商品だけ取り直し、親・兄弟は使い回す（6 時間）
+    resetKeepaLookupCache();
+    await lookupKeepa(JAN, "k", fetchFn, () => NOW_MS + 120_000);
     expect(fetchFn).toHaveBeenCalledTimes(4);
   });
 
@@ -192,6 +199,18 @@ describe("lookupKeepa", () => {
     expect(poor).toHaveBeenCalledTimes(1);
   });
 
+  it("同じ JAN を 12 時間以内にもう一度調べるときは Keepa を呼ばない（サーバー内のキャッシュ）", async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () => json({ products: [product], tokensLeft: 100, refillRate: 5, refillIn: 30000 }));
+    const first = await lookupKeepa(JAN, "k", fetchFn, () => NOW_MS);
+    expect(first.keepaTokens).toEqual({ left: 100, refillPerMinute: 5, refillInMs: 30000 });
+    const second = await lookupKeepa(JAN, "k", fetchFn, () => NOW_MS + 60 * 60 * 1000);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(second).toMatchObject({ fromCache: true, fetchedAt: first.fetchedAt });
+    // 12 時間を過ぎたら取り直す
+    await lookupKeepa(JAN, "k", fetchFn, () => NOW_MS + 13 * 60 * 60 * 1000);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
   it("トークン不足・キー違いは、キーや URL を含まない日本語のエラーにする", async () => {
     const tokens = await lookupKeepa(JAN, "secret-key", vi.fn<typeof fetch>(async () => json({ tokensLeft: -3, refillIn: 42000 }, 429))).catch((e) => e);
     expect(tokens).toBeInstanceOf(KeepaApiError);
@@ -202,7 +221,7 @@ describe("lookupKeepa", () => {
   });
 
   it("登録がなければ注意を返す", async () => {
-    expect(await lookupKeepa(JAN, "k", vi.fn<typeof fetch>(async () => json({ products: [] })))).toEqual({
+    expect(await lookupKeepa(JAN, "k", vi.fn<typeof fetch>(async () => json({ products: [] })))).toMatchObject({
       offers: [],
       warnings: ["Amazon: この JAN の商品は登録されていません（Keepa）。"],
     });

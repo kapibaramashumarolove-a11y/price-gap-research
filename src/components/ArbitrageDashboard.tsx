@@ -27,6 +27,7 @@ import {
   SELL_LABEL,
   type ArbitrageSettings,
   type JanLookup,
+  type KeepaTokens,
   type Mall,
   type MallOffer,
   type MinRank,
@@ -80,6 +81,37 @@ function keepScreenOn(): () => void {
     document.removeEventListener("visibilitychange", acquire);
     sentinel?.release().catch(() => {});
   };
+}
+
+/** 残りトークンがこれ以下になったら、Keepa を呼ぶ前に回復を待つ */
+const LOW_TOKENS = 10;
+/** 画面で使う Keepa の残りトークン（いつ分かった値か付き） */
+type TokenState = KeepaTokens & { at: number };
+
+/** 今の残りトークンの見込み（最後に分かった値 ＋ その後の回復分） */
+function estimateTokens(t: TokenState | null, now = Date.now()): number | undefined {
+  if (!t) return undefined;
+  if (!t.refillPerMinute) return t.left;
+  // Keepa は 1 分ごとに回復する。最初の回復は refillInMs 後
+  const first = t.refillInMs ?? 60_000;
+  const elapsed = now - t.at;
+  const refills = elapsed < first ? 0 : 1 + Math.floor((elapsed - first) / 60_000);
+  return t.left + refills * t.refillPerMinute;
+}
+
+/** 次に回復するまでの秒数 */
+function secondsToNextRefill(t: TokenState, now = Date.now()): number {
+  let next = (t.refillInMs ?? 60_000) - (now - t.at);
+  while (next < 0) next += 60_000;
+  return Math.ceil(next / 1000);
+}
+
+/** 残りトークンが LOW_TOKENS を超えるまでの待ち時間 [ミリ秒]（分からなければ 60 秒） */
+function waitForTokensMs(t: TokenState, now = Date.now()): number {
+  const est = estimateTokens(t, now) ?? 0;
+  if (!t.refillPerMinute) return 60_000;
+  const refillsNeeded = Math.ceil((LOW_TOKENS + 1 - est) / t.refillPerMinute);
+  return secondsToNextRefill(t, now) * 1000 + Math.max(0, refillsNeeded - 1) * 60_000;
 }
 
 /** Keepa のトークン不足のとき、回復を待つ最大時間 [ミリ秒] */
@@ -170,7 +202,24 @@ export default function ArbitrageDashboard() {
     return q && Array.isArray(q.jans) && q.next < q.jans.length ? q : null;
   });
   const [runNotice, setRunNotice] = useState("");
-  const [keepaTokens, setKeepaTokens] = useState<{ left: number; refillPerMinute?: number } | null>(null);
+  const [keepaTokens, setKeepaTokensState] = useState<TokenState | null>(null);
+  // 実行中のループからは state ではなく ref で最新の値を読む
+  const tokensRef = useRef<TokenState | null>(null);
+  const resultsRef = useRef(results);
+  resultsRef.current = results;
+  const setKeepaTokens = (t: KeepaTokens) => {
+    const next = { ...tokensRef.current, ...t, at: Date.now() };
+    tokensRef.current = next;
+    setKeepaTokensState(next);
+  };
+
+  /** その JAN の Amazon のデータを、キャッシュから使えるか（Keepa のトークンを使わない） */
+  function amazonCacheFor(jan: string) {
+    const cache = resultsRef.current[jan]?.amazonCache;
+    if (!cache || settings.keepaCacheHours <= 0) return undefined;
+    const age = Date.now() - new Date(cache.fetchedAt).getTime();
+    return age >= 0 && age < settings.keepaCacheHours * 60 * 60 * 1000 ? cache : undefined;
+  }
   const [showAllItems, setShowAllItems] = useState(false);
   const stopRequested = useRef(false);
   const rakutenCredentials = useRef<Promise<RakutenCredentials | null> | null>(null);
@@ -221,7 +270,7 @@ export default function ArbitrageDashboard() {
   }
 
   /** 1 つの JAN を調べる。Keepa のトークン不足なら、回復までの秒数を返す（呼び出し側で待ってやり直す） */
-  async function lookup(jan: string): Promise<number | undefined> {
+  async function lookup(jan: string, force = false): Promise<number | undefined> {
     setErrors((prev) => ({ ...prev, [jan]: "" }));
     try {
       // 楽天はブラウザから直接検索する（楽天が「許可されたWebサイト」をブラウザの送る URL で確認するため）。
@@ -232,7 +281,8 @@ export default function ArbitrageDashboard() {
       const res = await fetch("/api/jan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jan, rakuten }),
+        // 一定時間内に調べた Amazon（Keepa）のデータがあれば送り、サーバーは Keepa を呼ばない（トークン 0）
+        body: JSON.stringify({ jan, rakuten, amazonCache: force ? undefined : amazonCacheFor(jan), cacheHours: settings.keepaCacheHours }),
       });
       if (res.status === 401) {
         window.location.reload();
@@ -258,7 +308,16 @@ export default function ArbitrageDashboard() {
    * JAN を 1 件ずつ順番に調べる（バッチ処理）。楽天の 1 秒 1 回の制限のため間を空け、
    * Keepa のトークンが足りなくなったら回復まで待って同じ JAN をやり直す（中止ボタンで止められる）
    */
-  async function runAll(all: string[], options: { skipRecent?: boolean } = {}) {
+  /** 待つ（中止ボタンで抜ける）。待っている間は残り秒数を表示する */
+  async function waitWithCountdown(ms: number, label: (sec: number) => string, show: (note: string) => void) {
+    const until = Date.now() + Math.min(MAX_TOKEN_WAIT_MS, ms);
+    while (Date.now() < until && !stopRequested.current) {
+      show(label(Math.ceil((until - Date.now()) / 1000)));
+      await wait(1000);
+    }
+  }
+
+  async function runAll(all: string[], options: { skipRecent?: boolean; force?: boolean } = {}) {
     // まとめて調べるときは、最近調べた商品を飛ばしてトークンを節約する（「調べる」「調べ直す」は必ず調べる）
     const recentMs = RECENT_HOURS * 60 * 60 * 1000;
     const jans =
@@ -281,15 +340,26 @@ export default function ArbitrageDashboard() {
       // 画面を閉じても、開き直したときに続きから再開できるよう、どこまで進んだかを保存する
       saveJson(QUEUE_KEY, { jans, next: index, savedAt: new Date().toISOString() } satisfies Queue);
       setRunning({ jan, index: index + 1, total: jans.length, jans });
+      const show = (note: string) => setRunning({ jan, index: index + 1, total: jans.length, jans, note });
+      const usesKeepa = options.force || !amazonCacheFor(jan);
+
+      // 残りトークンが少ないときは、エラーにせず回復を待ってから Keepa を呼ぶ（キャッシュを使う商品は待たない）
+      const tokens = tokensRef.current;
+      const estimated = estimateTokens(tokens);
+      if (usesKeepa && tokens && estimated !== undefined && estimated <= LOW_TOKENS) {
+        await waitWithCountdown(waitForTokensMs(tokens), (sec) => `Keepa のトークン回復待ち（残り約 ${estimateTokens(tokensRef.current) ?? estimated} トークン・${sec} 秒後に自動再開）…`, show);
+        if (stopRequested.current) break;
+        setRunning({ jan, index: index + 1, total: jans.length, jans });
+      }
+
       const started = Date.now();
-      let refillSec = await lookup(jan);
+      let refillSec = await lookup(jan, options.force);
+      // それでも足りなかった（ほかの人・ほかの画面も同じキーを使っているなど）ときは、言われた時間待ってやり直す
       if (refillSec !== undefined && !stopRequested.current) {
-        const waitMs = Math.min(MAX_TOKEN_WAIT_MS, (refillSec + 2) * 1000);
-        setRunning({ jan, index: index + 1, total: jans.length, jans, note: `Keepa のトークン回復待ち（約 ${Math.ceil(waitMs / 1000)} 秒）…` });
-        for (let waited = 0; waited < waitMs && !stopRequested.current; waited += 1000) await wait(1000);
+        await waitWithCountdown((refillSec + 2) * 1000, (sec) => `Keepa のトークン回復待ち（${sec} 秒後に自動再開）…`, show);
         if (!stopRequested.current) {
           setRunning({ jan, index: index + 1, total: jans.length, jans });
-          refillSec = await lookup(jan);
+          refillSec = await lookup(jan, options.force);
         }
       }
       const rest = MIN_GAP_MS - (Date.now() - started);
@@ -385,7 +455,13 @@ export default function ArbitrageDashboard() {
           <Discover existing={items} onAdd={addItems} loadRakutenCredentials={loadRakutenCredentials} busy={busy} />
         </>
       ) : (
-        <BulkResearch loadRakutenCredentials={loadRakutenCredentials} onStart={runBulk} busy={busy} />
+        <BulkResearch
+          loadRakutenCredentials={loadRakutenCredentials}
+          onStart={runBulk}
+          busy={busy}
+          tokens={keepaTokens}
+          onTokensLeft={(left) => setKeepaTokens({ ...(tokensRef.current ?? {}), left, refillInMs: undefined })}
+        />
       )}
 
       {pendingQueue && !running && (
@@ -449,7 +525,7 @@ export default function ArbitrageDashboard() {
                     </div>
                     {errors[item.jan] && <div className="text-xs text-red-600">{errors[item.jan]}</div>}
                   </div>
-                  <button type="button" onClick={() => void runAll([item.jan])} disabled={busy} className="min-h-11 px-2 text-sm underline disabled:opacity-40">
+                  <button type="button" onClick={() => void runAll([item.jan], { force: true })} disabled={busy} className="min-h-11 px-2 text-sm underline disabled:opacity-40">
                     調べる
                   </button>
                   <button
@@ -562,7 +638,7 @@ export default function ArbitrageDashboard() {
           <RouteSummary rows={visibleRows} />
           <ul className="space-y-4">
             {visibleRows.map((row) => (
-              <ResultCard key={row.item.jan} row={row} settings={settings} onRefresh={() => void runAll([row.item.jan])} busy={busy} />
+              <ResultCard key={row.item.jan} row={row} settings={settings} onRefresh={() => void runAll([row.item.jan], { force: true })} busy={busy} />
             ))}
           </ul>
           </>
@@ -630,6 +706,28 @@ function ConnectionStatus() {
   );
 }
 
+// ---- Keepa の残りトークン（1 秒ごとに表示を更新） ----
+
+function TokenMeter({ tokens }: { tokens: TokenState }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const left = estimateTokens(tokens, now) ?? tokens.left;
+  const low = left <= LOW_TOKENS;
+  return (
+    <div className={`flex flex-wrap gap-x-3 text-xs ${low ? "font-semibold text-red-600" : "opacity-80"}`} role="status">
+      <span>Keepa 残り {left} トークン{tokens.refillPerMinute && now !== tokens.at ? "（見込み）" : ""}</span>
+      {tokens.refillPerMinute ? (
+        <span>
+          次の回復まで {secondsToNextRefill(tokens, now)} 秒（1 分ごとに +{tokens.refillPerMinute}）
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 // ---- 進捗 ----
 
 function RunProgress({
@@ -640,7 +738,7 @@ function RunProgress({
 }: {
   running: { jan: string; index: number; total: number; note?: string };
   found: number;
-  tokens: { left: number; refillPerMinute?: number } | null;
+  tokens: TokenState | null;
   onStop: () => void;
 }) {
   const percent = Math.round(((running.index - 1) / running.total) * 100);
@@ -651,7 +749,7 @@ function RunProgress({
           <div className="font-semibold">
             {running.index}/{running.total} 件処理中…（利益商品 {found} 件発見）
           </div>
-          <div className="truncate text-xs opacity-70">
+          <div className={`text-xs ${running.note ? "font-semibold text-amber-700 dark:text-amber-400" : "truncate opacity-70"}`}>
             {running.note ?? (
               <>
                 調査中: <span className="font-mono">{running.jan}</span>
@@ -666,12 +764,7 @@ function RunProgress({
       <div className="h-2 overflow-hidden rounded-full bg-black/10 dark:bg-white/15">
         <div className="h-full rounded-full bg-green-600 transition-[width]" style={{ width: `${percent}%` }} />
       </div>
-      {tokens && (
-        <div className={`text-xs ${tokens.left < 10 ? "font-semibold text-red-600" : "opacity-70"}`}>
-          Keepa 残り {tokens.left} トークン
-          {tokens.refillPerMinute ? `（1 分ごとに ${tokens.refillPerMinute} 回復）` : ""}
-        </div>
-      )}
+      {tokens && <TokenMeter tokens={tokens} />}
       <div className="text-xs opacity-60">画面を閉じると止まります（開き直すと続きから再開できます）。</div>
     </div>
   );
@@ -683,10 +776,14 @@ function BulkResearch({
   loadRakutenCredentials,
   onStart,
   busy,
+  tokens,
+  onTokensLeft,
 }: {
   loadRakutenCredentials: () => Promise<RakutenCredentials | null>;
   onStart: (found: JanItem[]) => Promise<void>;
   busy: boolean;
+  tokens: TokenState | null;
+  onTokensLeft: (left: number) => void;
 }) {
   const [options, setOptions] = useState<BulkOptions>(() => ({ ...DEFAULT_BULK, ...loadJson<Partial<BulkOptions>>(BULK_KEY) }));
   const [log, setLog] = useState<string[]>([]);
@@ -734,6 +831,7 @@ function BulkResearch({
       const body = await res.json();
       if (!res.ok) return { items: [], message: body.error ?? `${label}: 取得に失敗しました（HTTP ${res.status}）。` };
       const items = (body.items as { jan: string; title: string }[]).map((i) => ({ jan: i.jan, name: i.title.slice(0, 60) }));
+      if (typeof body.tokensLeft === "number") onTokensLeft(body.tokensLeft);
       const extra = [...(body.warnings as string[]), body.tokensLeft !== undefined ? `残りトークン ${body.tokensLeft}` : ""].filter(Boolean);
       return { items, message: `${label}: ${items.length} 件${extra.length > 0 ? `（${extra.join("・")}）` : ""}` };
     } catch {
@@ -810,6 +908,7 @@ function BulkResearch({
         </label>
       </div>
 
+      {tokens && !busy && <TokenMeter tokens={tokens} />}
       <button type="button" onClick={() => void start()} disabled={busy || collecting || options.sources.length === 0} className={`${PRIMARY} w-full`}>
         {collecting ? "商品を集めています…" : "全自動リサーチ開始"}
       </button>
@@ -1151,6 +1250,16 @@ function SettingsPanel({ settings, onChange }: { settings: ArbitrageSettings; on
 
         <fieldset className="space-y-2">
           <legend className="mb-1 text-sm font-semibold">Amazon の販売価格・リスク判定（Keepa）</legend>
+          <label className="flex min-w-0 flex-col gap-1 text-sm">
+            <span>Keepa のデータを使い回す時間（トークン節約）</span>
+            <select value={settings.keepaCacheHours} onChange={(e) => set({ keepaCacheHours: Number(e.target.value) })} className={INPUT_CLASS}>
+              {[0, 6, 12, 24].map((h) => (
+                <option key={h} value={h}>
+                  {h === 0 ? "使い回さない（毎回 Keepa を呼ぶ）" : `${h} 時間`}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="flex min-h-11 items-center gap-2 text-sm">
             <input type="checkbox" checked={settings.safePrice} onChange={(e) => set({ safePrice: e.target.checked })} className="h-5 w-5" />
             カート価格と 90 日平均の低い方で計算する（安全値）

@@ -1,8 +1,10 @@
 // POST /api/jan  1 つの JAN を Amazon・楽天・Yahoo! でまとめて調べる。
-// 本文（JSON）: { jan: "4902370548495", rakuten?: ブラウザで調べた楽天の結果 }
+// 本文（JSON）: { jan: "4902370548495", rakuten?: ブラウザで調べた楽天の結果,
+//               amazonCache?: 前回の応答の amazonCache, cacheHours?: キャッシュを使ってよい時間（1〜24） }
 // 応答: JanLookup（src/lib/malls.ts）。利益の計算は画面側（src/lib/arbitrage.ts）で行う。
 
 import type { NextRequest } from "next/server";
+import { parseClientAmazonCache } from "@/lib/amazonCache";
 import { AUTH_COOKIE, isAuthenticated } from "@/lib/auth";
 import { normalizeJan } from "@/lib/jan";
 import { lookupJan } from "@/lib/lookup";
@@ -18,7 +20,7 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "ログインが必要です。" }, { status: 401 });
   }
 
-  const body = (await request.json().catch(() => null)) as { jan?: unknown; rakuten?: unknown } | null;
+  const body = (await request.json().catch(() => null)) as { jan?: unknown; rakuten?: unknown; amazonCache?: unknown; cacheHours?: unknown } | null;
   const jan = normalizeJan(body?.jan);
   if (!jan) {
     return Response.json(
@@ -29,7 +31,11 @@ export async function POST(request: NextRequest) {
 
   try {
     // 楽天はブラウザで検索した結果が送られてくる（src/lib/rakuten.ts の説明を参照）。送られてこなければサーバーから呼ぶ
-    const result = await lookupJan(jan, parseClientRakuten(body?.rakuten), defaultLookupDeps(request.nextUrl.origin));
+    // 一定時間内に調べた Amazon（Keepa）のデータがブラウザから送られてきたら、それを使って Keepa を呼ばない（トークン 0）
+    const deps = defaultLookupDeps(request.nextUrl.origin);
+    const cached = deps.amazon ? parseClientAmazonCache(body?.amazonCache, body?.cacheHours) : undefined;
+    if (cached) deps.amazon = async () => cached;
+    const result = await lookupJan(jan, parseClientRakuten(body?.rakuten), deps);
     return Response.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     console.error("jan lookup failed:", err);

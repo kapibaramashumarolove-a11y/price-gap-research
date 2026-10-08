@@ -127,6 +127,16 @@ describe("lookupJan", () => {
     expect(result.warnings).toEqual(["Amazon: テスト"]);
   });
 
+  it("Amazon のデータをキャッシュ用に返す（キャッシュを使ったときは元の取得時刻のまま）", async () => {
+    const product = { asin: "B0", title: "x", url: "https://www.amazon.co.jp/dp/B0" };
+    const fresh = await lookupJan(JAN, { offers: [] }, { amazon: async () => ({ product, offers: [], warnings: [], fetchedAt: "2026-10-07T00:00:00.000Z" }), now });
+    expect(fresh.amazonCache).toEqual({ product, offers: [], fetchedAt: "2026-10-07T00:00:00.000Z" });
+    const cached = await lookupJan(JAN, { offers: [] }, { amazon: async () => ({ product, offers: [], warnings: [], fetchedAt: "2026-10-06T00:00:00.000Z", fromCache: true }), now });
+    expect(cached).toMatchObject({ amazonFromCache: true, amazonCache: { fetchedAt: "2026-10-06T00:00:00.000Z" } });
+    // Amazon を調べられなかったときは返さない
+    expect((await lookupJan(JAN, { offers: [] }, { now })).amazonCache).toBeUndefined();
+  });
+
   it("モールごとの失敗は注意にして、ほかのモールの結果は返す", async () => {
     const result = await lookupJan(JAN, { error: "楽天: アクセスが拒否されました" }, {
       amazon: async () => {

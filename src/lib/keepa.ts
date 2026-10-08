@@ -13,7 +13,7 @@
 
 import { cleanEnvValue } from "./env";
 import type { AmazonLookup } from "./amazon";
-import type { AmazonProduct, MallOffer } from "./malls";
+import type { AmazonProduct, KeepaTokens, MallOffer } from "./malls";
 
 const KEEPA_URL = "https://api.keepa.com/product";
 /** Keepa のドメイン番号（5 = Amazon.co.jp） */
@@ -312,8 +312,41 @@ async function checkVariations(
   return { variationCount: siblings.length, variationSharePercent: byReviews, variationShareBasis: byReviews === undefined ? undefined : "reviews" };
 }
 
-/** 1 つの JAN を Keepa で調べる */
+/** Keepa の応答から残りトークンを読む（なければ前の値） */
+function tokensOf(d: KeepaResponse, prev?: KeepaTokens): KeepaTokens | undefined {
+  if (typeof d.tokensLeft !== "number") return prev;
+  return {
+    left: d.tokensLeft,
+    refillPerMinute: d.refillRate ?? prev?.refillPerMinute,
+    refillInMs: typeof d.refillIn === "number" ? d.refillIn : prev?.refillInMs,
+  };
+}
+
+/**
+ * サーバー内のキャッシュ（同じサーバーが続けて使われている間だけ有効）。
+ * 主なキャッシュはブラウザ側（JanLookup.amazonCache を送り返す）で、こちらは補助
+ */
+const SERVER_CACHE_MS = 12 * 60 * 60 * 1000;
+const serverCache = new Map<string, { at: number; result: AmazonLookup }>();
+
+/** テスト用: サーバー内のキャッシュを消す */
+export function resetKeepaLookupCache() {
+  serverCache.clear();
+}
+
+/** 1 つの JAN を Keepa で調べる（12 時間以内に同じサーバーで調べていればトークンを使わない） */
 export async function lookupKeepa(jan: string, key: string, fetchFn: typeof fetch = fetch, now: () => number = Date.now): Promise<AmazonLookup> {
+  const hit = serverCache.get(jan);
+  if (hit && now() - hit.at < SERVER_CACHE_MS) {
+    return { ...hit.result, keepaTokens: undefined, fromCache: true, warnings: [...hit.result.warnings] };
+  }
+  const result = await lookupKeepaUncached(jan, key, fetchFn, now);
+  // トークン不足などで情報が欠けた結果は使い回さない
+  if (!result.warnings.some((w) => /トークンが足りません|判定は省略/.test(w))) serverCache.set(jan, { at: now(), result });
+  return result;
+}
+
+async function lookupKeepaUncached(jan: string, key: string, fetchFn: typeof fetch, now: () => number): Promise<AmazonLookup> {
   const data = await keepaRequest(
     // カート価格（current[18]）と持ち主、直近 15 日の履歴（出品者数の推移）を含める
     { code: jan, stats: STATS_DAYS, buybox: "1", history: "1", days: HISTORY_DAYS },
@@ -322,16 +355,23 @@ export async function lookupKeepa(jan: string, key: string, fetchFn: typeof fetc
   );
 
   const products = (data.products ?? []).filter((p) => p.asin && hasJan(p, jan));
-  if (products.length === 0) return { offers: [], warnings: ["Amazon: この JAN の商品は登録されていません（Keepa）。"] };
+  if (products.length === 0) {
+    return {
+      offers: [],
+      warnings: ["Amazon: この JAN の商品は登録されていません（Keepa）。"],
+      keepaTokens: tokensOf(data),
+      fetchedAt: new Date(now()).toISOString(),
+    };
+  }
   // 同じ JAN に複数の ASIN があるときは、一番売れている（ランキングの小さい）ものを使う
   const rankOf = (p: KeepaProduct) => value(p.stats?.current, CSV.SALES) ?? Infinity;
   const best = [...products].sort((a, b) => rankOf(a) - rankOf(b))[0];
   const result = parseKeepaProduct(best, now());
   if (products.length > 1) result.warnings.push(`Amazon: この JAN に ${products.length} 件の商品ページがあります（一番売れている ${best.asin} で計算）。`);
 
-  let tokens = typeof data.tokensLeft === "number" ? { left: data.tokensLeft, refillPerMinute: data.refillRate } : undefined;
+  let tokens = tokensOf(data);
   const onTokens = (d: KeepaResponse) => {
-    if (typeof d.tokensLeft === "number") tokens = { left: d.tokensLeft, refillPerMinute: d.refillRate ?? tokens?.refillPerMinute };
+    tokens = tokensOf(d, tokens);
   };
 
   if (best.parentAsin && result.product) {
@@ -351,6 +391,7 @@ export async function lookupKeepa(jan: string, key: string, fetchFn: typeof fetc
     result.warnings.push(`Amazon（Keepa）: 残りトークンが少なくなっています（${tokens.left}）。`);
   }
   result.keepaTokens = tokens;
+  result.fetchedAt = new Date(now()).toISOString();
   return result;
 }
 

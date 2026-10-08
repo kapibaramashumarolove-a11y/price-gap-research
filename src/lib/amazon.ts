@@ -13,7 +13,7 @@
 //   - Product Fees v0 getMyFeesEstimateForASIN  … FBA で売るときの手数料の見積もり（1 回/秒）
 
 import { cleanEnvValue } from "./env";
-import type { AmazonProduct, MallOffer } from "./malls";
+import type { AmazonProduct, KeepaTokens, MallOffer } from "./malls";
 
 export const AMAZON_SP_ENDPOINT = "https://sellingpartnerapi-fe.amazon.com";
 export const AMAZON_JP_MARKETPLACE = "A1VC38T7YXB528";
@@ -320,8 +320,12 @@ export type AmazonLookup = {
   product?: AmazonProduct;
   offers: MallOffer[];
   warnings: string[];
-  /** Keepa の残りトークンと 1 分あたりの回復量（Keepa で調べたときだけ） */
-  keepaTokens?: { left: number; refillPerMinute?: number };
+  /** Keepa の残りトークン（Keepa で調べたときだけ） */
+  keepaTokens?: KeepaTokens;
+  /** Amazon のデータを取得した時刻（キャッシュを使ったときは元の取得時刻） */
+  fetchedAt?: string;
+  /** キャッシュを使ったか（Keepa を呼んでいない） */
+  fromCache?: boolean;
 };
 
 export async function lookupAmazon(jan: string, creds: AmazonCredentials, deps: AmazonDeps = {}): Promise<AmazonLookup> {

@@ -175,6 +175,8 @@ export async function lookupJan(jan: string, rakuten: RakutenResult | undefined,
     excludedSets,
     excludedUsed,
     keepaTokens: amazon?.keepaTokens,
+    amazonCache: amazon ? { product, offers: offers.amazon, fetchedAt: amazon.fetchedAt ?? (deps.now?.() ?? new Date()).toISOString() } : undefined,
+    amazonFromCache: amazon?.fromCache || undefined,
     fetchedAt: (deps.now?.() ?? new Date()).toISOString(),
   };
 }
