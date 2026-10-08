@@ -289,6 +289,7 @@ export default function ArbitrageDashboard() {
         <p className="text-sm opacity-80">
           JAN コードで Amazon・楽天市場・Yahoo!ショッピングの同じ商品だけを照合し、ポイント還元と FBA 手数料を含めた利益が一番大きい「仕入れ先 ➔ 販売先」を自動で選びます。
         </p>
+        <ConnectionStatus />
       </header>
 
       {/* リサーチモードの切り替え */}
@@ -475,6 +476,64 @@ export default function ArbitrageDashboard() {
         )}
       </section>
     </main>
+  );
+}
+
+// ---- 接続状況（API キーが設定されているか。値は扱わない） ----
+
+type ConfigStatus = { keepa: boolean; spApi: boolean; rakuten: boolean; yahoo: boolean; keepaLikeNames: string[]; vercelEnv?: string };
+
+function ConnectionStatus() {
+  const [status, setStatus] = useState<ConfigStatus | null>(null);
+  useEffect(() => {
+    fetch("/api/status", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then(setStatus)
+      .catch(() => setStatus(null));
+  }, []);
+  if (!status) return null;
+
+  const amazon = status.keepa || status.spApi;
+  const items: [string, boolean, string][] = [
+    ["Amazon", amazon, status.keepa ? (status.spApi ? "Keepa＋SP-API" : "Keepa") : status.spApi ? "SP-API" : "未設定"],
+    ["楽天", status.rakuten, status.rakuten ? "OK" : "未設定"],
+    ["Yahoo!", status.yahoo, status.yahoo ? "OK" : "未設定"],
+  ];
+  return (
+    <div className="space-y-1 pt-1">
+      <div className="flex flex-wrap gap-1.5 text-xs">
+        {items.map(([label, ok, text]) => (
+          <span key={label} className={`rounded-full px-2 py-0.5 font-medium ${ok ? "bg-green-600/15 text-green-800 dark:text-green-300" : "bg-red-600/15 text-red-700 dark:text-red-300"}`}>
+            {ok ? "✓" : "✕"} {label}: {text}
+          </span>
+        ))}
+      </div>
+      {!amazon && (
+        <div className="rounded-lg border border-red-500/50 p-2 text-xs">
+          <p className="font-semibold text-red-600">Amazon（Keepa）のキーがこのサーバーから見えていません。</p>
+          {status.keepaLikeNames.length > 0 ? (
+            <p>
+              似た名前の環境変数 <span className="font-mono">{status.keepaLikeNames.join("・")}</span> があります。名前を
+              <span className="font-mono"> KEEPA_API_KEY </span>（すべて大文字）に変えてください。
+            </p>
+          ) : (
+            <p>Vercel の Settings → Environment Variables で次を確認してください。</p>
+          )}
+          <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+            <li>
+              名前が <span className="font-mono">KEEPA_API_KEY</span>（すべて大文字・前後に空白なし）
+            </li>
+            <li>
+              対象の環境（Environments）に <span className="font-semibold">Production</span> のチェックが入っている
+              {status.vercelEnv && `（今開いているのは ${status.vercelEnv} 環境）`}
+            </li>
+            <li>
+              追加・変更したあと、Deployments 画面で最新のデプロイを <span className="font-semibold">Redeploy</span> した（環境変数は次のデプロイから反映されます）
+            </li>
+          </ol>
+        </div>
+      )}
+    </div>
   );
 }
 

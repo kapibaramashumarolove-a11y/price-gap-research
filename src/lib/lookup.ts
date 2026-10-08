@@ -119,7 +119,7 @@ export async function lookupJan(jan: string, rakuten: RakutenResult | undefined,
   // ---- Amazon ----
   let amazon: AmazonLookup | undefined;
   if (!deps.amazon) {
-    warnings.push("Amazon: KEEPA_API_KEY（または SP-API のキー）が未設定のため、楽天・Yahoo! だけで比較しています。");
+    warnings.push("Amazon: サーバーから KEEPA_API_KEY が見えないため、楽天・Yahoo! だけで比較しています（Vercel で登録したら、Production にチェックして Redeploy してください）。");
   } else if (amazonResult.status === "fulfilled") {
     amazon = amazonResult.value;
     warnings.push(...(amazon?.warnings ?? []));
