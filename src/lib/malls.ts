@@ -1,4 +1,4 @@
-// 国内 3 モール（Amazon・楽天市場・Yahoo!ショッピング）の比較で使う型と初期値。
+// 楽天市場・Yahoo!ショッピング（と、利用者が Keepa で確認して入力する Amazon の販売価格）の比較で使う型と初期値。
 // 画面とサーバーの両方から使うので、キーなどサーバー専用のものは置かないこと。
 
 export type Mall = "amazon" | "rakuten" | "yahoo";
@@ -82,9 +82,6 @@ export type AmazonProduct = {
   url: string;
 };
 
-/** Keepa の残りトークン（left）、1 分あたりの回復量、次に回復するまでの時間 [ミリ秒] */
-export type KeepaTokens = { left: number; refillPerMinute?: number; refillInMs?: number };
-
 /** 1 つの JAN を 3 モールで調べた結果（/api/jan の応答） */
 export type JanLookup = {
   jan: string;
@@ -100,15 +97,6 @@ export type JanLookup = {
   excludedSets: number;
   /** 中古・開封品・訳ありなど、新品ではないため除いた出品数（古い結果にはない） */
   excludedUsed?: number;
-  /** 調べた直後の Keepa の残りトークン */
-  keepaTokens?: KeepaTokens;
-  /**
-   * Amazon のデータ（キャッシュ用）。ブラウザに保存し、一定時間内に同じ JAN を調べるときは
-   * これをサーバーに送り返して Keepa を呼ばない（トークン 0）
-   */
-  amazonCache?: { product?: AmazonProduct; offers: MallOffer[]; fetchedAt: string };
-  /** Amazon のデータがキャッシュ（何時間か前に取得したもの）か */
-  amazonFromCache?: boolean;
   fetchedAt: string;
 };
 
@@ -138,8 +126,6 @@ export type ArbitrageSettings = {
   minMarginPercent: number;
   /** お宝にする回転率ランクの下限（none: 問わない） */
   minRank: MinRank;
-  /** Keepa のデータを使い回す時間 [時間]（0 = 使い回さない） */
-  keepaCacheHours: number;
   /** Amazon の販売価格を「現在のカート価格」と「90 日平均」の低い方にする（一時的な高騰で仕入れない） */
   safePrice: boolean;
   /** カートを自己発送（FBM）が持っているとき、FBA で出品する価格をカート価格の何 % 上で見込むか（0〜10） */
@@ -167,7 +153,6 @@ export const DEFAULT_ARBITRAGE_SETTINGS: ArbitrageSettings = {
   minProfitJpy: 1000,
   minMarginPercent: 10,
   minRank: "none",
-  keepaCacheHours: 12,
   safePrice: true,
   fbaPremiumPercent: 5,
   offerSurgePercent: 30,

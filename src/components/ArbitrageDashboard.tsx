@@ -1,11 +1,12 @@
 "use client";
 
-// 国内 3 モール（Amazon・楽天市場・Yahoo!ショッピング）の価格差リサーチ画面。
-// 登録した JAN を 1 つずつ 3 モールで調べ、「どこで仕入れてどこで売ると一番得か」を計算して表示する。
+// 電脳せどりのリサーチ画面（楽天市場・Yahoo!ショッピング）。
+// 登録した JAN を 1 つずつ楽天・Yahoo! で調べ、ポイント・送料込みの最安仕入れ値と、楽天 ⇄ Yahoo! の価格差を表示する。
+// Amazon は API を使わず、利用者が Keepa で確認する（Amazon・Keepa へのリンクと、販売価格の入力欄を出す）。
 // JAN の一覧・計算の前提・最後の結果はブラウザの localStorage に保存する。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { analyzeJan, monthlySalesEstimate, type Analysis, type Route } from "@/lib/arbitrage";
+import { analyzeJan, bestBuyOption, type Analysis, type Route } from "@/lib/arbitrage";
 import { loadJson, saveJson } from "@/lib/browserStorage";
 import {
   DISCOVERY_CATEGORIES,
@@ -22,17 +23,11 @@ import {
   DEFAULT_ARBITRAGE_SETTINGS,
   MALL_LABEL,
   MALLS,
-  MIN_RANKS,
-  RANK_INFO,
   SELL_LABEL,
   type ArbitrageSettings,
   type JanLookup,
-  type KeepaTokens,
   type Mall,
   type MallOffer,
-  type MinRank,
-  type Risk,
-  type TurnoverRank,
 } from "@/lib/malls";
 import { fetchRakuten, fetchRakutenHighPoint, fetchRakutenRanking, type RakutenCredentials, type RakutenResult } from "@/lib/rakuten";
 import { INPUT_CLASS } from "./Fields";
@@ -46,17 +41,47 @@ const VIEW_KEY = "price-gap:result-view";
 const BULK_KEY = "price-gap:bulk-options";
 
 type Mode = "single" | "bulk";
-type SortKey = "profit" | "margin" | "rank";
-type ResultView = { sort: SortKey; minProfitJpy: number; noRiskOnly: boolean };
-const DEFAULT_VIEW: ResultView = { sort: "profit", minProfitJpy: 0, noRiskOnly: false };
+type SortKey = "profit" | "margin" | "price";
+type ResultView = { sort: SortKey; minProfitJpy: number };
+const DEFAULT_VIEW: ResultView = { sort: "profit", minProfitJpy: 0 };
 const MIN_PROFIT_FILTERS = [0, 1000, 3000, 5000];
-const RANK_SORT: Record<TurnoverRank, number> = { S: 4, A: 3, B: 2, C: 1, unknown: 0 };
 
 type BulkOptions = { sources: DiscoverySource[]; category: DiscoveryCategory; limit: number };
-const DEFAULT_BULK: BulkOptions = { sources: ["keepa", "yahoo"], category: "all", limit: 20 };
+const DEFAULT_BULK: BulkOptions = { sources: ["rakuten", "yahoo"], category: "all", limit: 20 };
 /** 途中で止まったリサーチの続き（画面を閉じても、開き直すと再開できるように保存） */
 const QUEUE_KEY = "price-gap:research-queue";
 const SKIP_RECENT_KEY = "price-gap:skip-recent";
+/** 仕入れ先として調べるモール（Amazon は API を使わないので仕入れ先にしない） */
+const BUY_MALLS: Mall[] = ["rakuten", "yahoo"];
+const AMAZON_PRICES_KEY = "price-gap:amazon-prices";
+
+/** 楽天・Yahoo! の中で、ポイント・送料込みの実質価格が一番安い仕入れ値（出品がなければ Infinity） */
+function cheapestNet(lookup: JanLookup, settings: ArbitrageSettings): number {
+  const nets = BUY_MALLS.map((m) => bestBuyOption(lookup.offers[m], settings)?.netJpy).filter((n): n is number => n !== undefined);
+  return nets.length > 0 ? Math.min(...nets) : Infinity;
+}
+
+/** Amazon で JAN を検索する URL（API は使わず、利用者が自分で確認する） */
+function amazonSearchUrl(jan: string): string {
+  return `https://www.amazon.co.jp/s?k=${encodeURIComponent(jan)}`;
+}
+
+/** Keepa で JAN を検索する URL（5 = Amazon.co.jp） */
+function keepaSearchUrl(jan: string): string {
+  return `https://keepa.com/#!search/5-${encodeURIComponent(jan)}`;
+}
+
+/**
+ * 計算に使う Amazon のデータを、手入力の販売価格だけにする（API の Amazon データは使わない。
+ * 以前 Keepa で調べた結果が残っていても無視する）。販売価格がなければ Amazon は計算に入れない
+ */
+function withManualAmazon(lookup: JanLookup, priceJpy: number | undefined): JanLookup {
+  return {
+    ...lookup,
+    offers: { ...lookup.offers, amazon: [] },
+    amazon: priceJpy && priceJpy > 0 ? { asin: "", title: lookup.title, url: amazonSearchUrl(lookup.jan), buyBoxPriceJpy: priceJpy } : undefined,
+  };
+}
 /** 「最近調べた商品は飛ばす」の期間 [時間] */
 const RECENT_HOURS = 6;
 type Queue = { jans: string[]; next: number; savedAt: string };
@@ -83,40 +108,6 @@ function keepScreenOn(): () => void {
   };
 }
 
-/** 残りトークンがこれ以下になったら、Keepa を呼ぶ前に回復を待つ */
-const LOW_TOKENS = 10;
-/** 画面で使う Keepa の残りトークン（いつ分かった値か付き） */
-type TokenState = KeepaTokens & { at: number };
-
-/** 今の残りトークンの見込み（最後に分かった値 ＋ その後の回復分） */
-function estimateTokens(t: TokenState | null, now = Date.now()): number | undefined {
-  if (!t) return undefined;
-  if (!t.refillPerMinute) return t.left;
-  // Keepa は 1 分ごとに回復する。最初の回復は refillInMs 後
-  const first = t.refillInMs ?? 60_000;
-  const elapsed = now - t.at;
-  const refills = elapsed < first ? 0 : 1 + Math.floor((elapsed - first) / 60_000);
-  return t.left + refills * t.refillPerMinute;
-}
-
-/** 次に回復するまでの秒数 */
-function secondsToNextRefill(t: TokenState, now = Date.now()): number {
-  let next = (t.refillInMs ?? 60_000) - (now - t.at);
-  while (next < 0) next += 60_000;
-  return Math.ceil(next / 1000);
-}
-
-/** 残りトークンが LOW_TOKENS を超えるまでの待ち時間 [ミリ秒]（分からなければ 60 秒） */
-function waitForTokensMs(t: TokenState, now = Date.now()): number {
-  const est = estimateTokens(t, now) ?? 0;
-  if (!t.refillPerMinute) return 60_000;
-  const refillsNeeded = Math.ceil((LOW_TOKENS + 1 - est) / t.refillPerMinute);
-  return secondsToNextRefill(t, now) * 1000 + Math.max(0, refillsNeeded - 1) * 60_000;
-}
-
-/** Keepa のトークン不足のとき、回復を待つ最大時間 [ミリ秒] */
-const MAX_TOKEN_WAIT_MS = 5 * 60 * 1000;
-
 /** 楽天の API は 1 秒に 1 回までなので、JAN と JAN の間を空ける [ミリ秒] */
 const MIN_GAP_MS = 1100;
 /** 一覧で最初に表示する JAN の数 */
@@ -141,14 +132,6 @@ const RANKING_GENRES: { id: string; label: string }[] = [
 const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 });
 const dateTime = new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
-const RANK_STYLE: Record<TurnoverRank, string> = {
-  S: "bg-green-600 text-white",
-  A: "bg-sky-600 text-white",
-  B: "bg-amber-500 text-black",
-  C: "bg-red-600 text-white",
-  unknown: "border border-black/30 dark:border-white/40",
-};
-const RANK_WORD: Record<TurnoverRank, string> = { S: "即売れ", A: "高回転", B: "中回転", C: "低回転", unknown: "回転率不明" };
 
 const BUTTON = "flex min-h-12 items-center justify-center rounded-lg px-3 text-center text-sm active:opacity-70 disabled:opacity-40";
 const PRIMARY = `${BUTTON} bg-foreground text-base font-medium text-background`;
@@ -160,6 +143,8 @@ function loadSettings(): ArbitrageSettings {
   return {
     ...d,
     ...saved,
+    // 回転率は Keepa で手動確認するので、推奨の条件には使わない（以前の設定が残っていても外す）
+    minRank: "none",
     extraPointPercent: { ...d.extraPointPercent, ...saved.extraPointPercent },
     sell: {
       amazon: { ...d.sell.amazon, ...saved.sell?.amazon },
@@ -202,24 +187,8 @@ export default function ArbitrageDashboard() {
     return q && Array.isArray(q.jans) && q.next < q.jans.length ? q : null;
   });
   const [runNotice, setRunNotice] = useState("");
-  const [keepaTokens, setKeepaTokensState] = useState<TokenState | null>(null);
-  // 実行中のループからは state ではなく ref で最新の値を読む
-  const tokensRef = useRef<TokenState | null>(null);
-  const resultsRef = useRef(results);
-  resultsRef.current = results;
-  const setKeepaTokens = (t: KeepaTokens) => {
-    const next = { ...tokensRef.current, ...t, at: Date.now() };
-    tokensRef.current = next;
-    setKeepaTokensState(next);
-  };
-
-  /** その JAN の Amazon のデータを、キャッシュから使えるか（Keepa のトークンを使わない） */
-  function amazonCacheFor(jan: string) {
-    const cache = resultsRef.current[jan]?.amazonCache;
-    if (!cache || settings.keepaCacheHours <= 0) return undefined;
-    const age = Date.now() - new Date(cache.fetchedAt).getTime();
-    return age >= 0 && age < settings.keepaCacheHours * 60 * 60 * 1000 ? cache : undefined;
-  }
+  /** Keepa で確認した Amazon の販売価格（JAN ごと・手入力。入れると「→ Amazon FBA 販売」の利益も出す） */
+  const [amazonPrices, setAmazonPrices] = useState<Record<string, number>>(() => loadJson(AMAZON_PRICES_KEY) ?? {});
   const [showAllItems, setShowAllItems] = useState(false);
   const stopRequested = useRef(false);
   const rakutenCredentials = useRef<Promise<RakutenCredentials | null> | null>(null);
@@ -231,29 +200,31 @@ export default function ArbitrageDashboard() {
   useEffect(() => saveJson(MODE_KEY, mode), [mode]);
   useEffect(() => saveJson(VIEW_KEY, view), [view]);
   useEffect(() => saveJson(SKIP_RECENT_KEY, skipRecent), [skipRecent]);
+  useEffect(() => saveJson(AMAZON_PRICES_KEY, amazonPrices), [amazonPrices]);
 
   // 調べた JAN ごとに、今の設定で全ルートを計算し、一番利益の大きいルートの順に並べる
   const rows = useMemo(() => {
     const list: Row[] = items.flatMap((item) => {
       const lookup = results[item.jan];
-      return lookup ? [{ item, lookup, analysis: analyzeJan(lookup, settings) }] : [];
+      if (!lookup) return [];
+      const withAmazon = withManualAmazon(lookup, amazonPrices[item.jan]);
+      return [{ item, lookup: withAmazon, analysis: analyzeJan(withAmazon, settings) }];
     });
     const profit = (r: Row) => r.analysis.best?.profitJpy ?? -Infinity;
     const key: Record<SortKey, (r: Row) => number> = {
       profit,
       margin: (r) => r.analysis.best?.marginPercent ?? -Infinity,
-      // 回転率の高い順（同じなら利益の大きい順）
-      rank: (r) => (RANK_SORT[r.analysis.best?.rank ?? "unknown"] ?? 0) * 1e9 + Math.max(-1e8, Math.min(1e8, profit(r))),
+      // 仕入れ値（ポイント・送料込みの実質価格）の安い順
+      price: (r) => -cheapestNet(r.lookup, settings),
     };
     return list.sort((a, b) => key[view.sort](b) - key[view.sort](a));
-  }, [items, results, settings, view.sort]);
+  }, [items, results, settings, view.sort, amazonPrices]);
   const treasureCount = rows.filter((r) => r.analysis.best?.isTreasure).length;
   const lastBulkSet = new Set(lastBulkJans);
   const visibleRows = rows.filter((r) => {
     const best = r.analysis.best;
     if (onlyTreasures && !best?.isTreasure) return false;
     if (view.minProfitJpy > 0 && (best?.profitJpy ?? -Infinity) < view.minProfitJpy) return false;
-    if (view.noRiskOnly && (!best || best.risks.length > 0)) return false;
     if (onlyLastBulk && lastBulkSet.size > 0 && !lastBulkSet.has(r.item.jan)) return false;
     return true;
   });
@@ -269,8 +240,8 @@ export default function ArbitrageDashboard() {
     return rakutenCredentials.current;
   }
 
-  /** 1 つの JAN を調べる。Keepa のトークン不足なら、回復までの秒数を返す（呼び出し側で待ってやり直す） */
-  async function lookup(jan: string, force = false): Promise<number | undefined> {
+  /** 1 つの JAN を楽天・Yahoo! で調べる */
+  async function lookup(jan: string): Promise<void> {
     setErrors((prev) => ({ ...prev, [jan]: "" }));
     try {
       // 楽天はブラウザから直接検索する（楽天が「許可されたWebサイト」をブラウザの送る URL で確認するため）。
@@ -281,8 +252,7 @@ export default function ArbitrageDashboard() {
       const res = await fetch("/api/jan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // 一定時間内に調べた Amazon（Keepa）のデータがあれば送り、サーバーは Keepa を呼ばない（トークン 0）
-        body: JSON.stringify({ jan, rakuten, amazonCache: force ? undefined : amazonCacheFor(jan), cacheHours: settings.keepaCacheHours }),
+        body: JSON.stringify({ jan, rakuten }),
       });
       if (res.status === 401) {
         window.location.reload();
@@ -293,32 +263,15 @@ export default function ArbitrageDashboard() {
         setErrors((prev) => ({ ...prev, [jan]: body.error ?? `取得に失敗しました（HTTP ${res.status}）。` }));
         return;
       }
-      const result = body as JanLookup;
-      setResults((prev) => ({ ...prev, [jan]: result }));
-      if (result.keepaTokens) setKeepaTokens(result.keepaTokens);
-      // Keepa のトークン不足（Amazon だけ取れなかった）なら、回復を待ってやり直せるよう秒数を返す
-      const tokenWarning = result.warnings.find((w) => w.includes("トークンが足りません"));
-      if (tokenWarning) return Number(tokenWarning.match(/約 (\d+) 秒後/)?.[1] ?? 60);
+      setResults((prev) => ({ ...prev, [jan]: body as JanLookup }));
     } catch {
       setErrors((prev) => ({ ...prev, [jan]: "サーバーに接続できませんでした。" }));
     }
   }
 
-  /**
-   * JAN を 1 件ずつ順番に調べる（バッチ処理）。楽天の 1 秒 1 回の制限のため間を空け、
-   * Keepa のトークンが足りなくなったら回復まで待って同じ JAN をやり直す（中止ボタンで止められる）
-   */
-  /** 待つ（中止ボタンで抜ける）。待っている間は残り秒数を表示する */
-  async function waitWithCountdown(ms: number, label: (sec: number) => string, show: (note: string) => void) {
-    const until = Date.now() + Math.min(MAX_TOKEN_WAIT_MS, ms);
-    while (Date.now() < until && !stopRequested.current) {
-      show(label(Math.ceil((until - Date.now()) / 1000)));
-      await wait(1000);
-    }
-  }
-
-  async function runAll(all: string[], options: { skipRecent?: boolean; force?: boolean } = {}) {
-    // まとめて調べるときは、最近調べた商品を飛ばしてトークンを節約する（「調べる」「調べ直す」は必ず調べる）
+  /** JAN を 1 件ずつ順番に調べる（バッチ処理）。楽天の 1 秒 1 回の制限のため間を空ける（中止ボタンで止められる） */
+  async function runAll(all: string[], options: { skipRecent?: boolean } = {}) {
+    // まとめて調べるときは、最近調べた商品を飛ばす（「調べる」「調べ直す」は必ず調べる）
     const recentMs = RECENT_HOURS * 60 * 60 * 1000;
     const jans =
       options.skipRecent && skipRecent
@@ -328,7 +281,7 @@ export default function ArbitrageDashboard() {
           })
         : all;
     const skipped = all.length - jans.length;
-    setRunNotice(skipped > 0 ? `${skipped} 件は ${RECENT_HOURS} 時間以内に調べ済みのため飛ばしました（トークン節約）。` : "");
+    setRunNotice(skipped > 0 ? `${skipped} 件は ${RECENT_HOURS} 時間以内に調べ済みのため飛ばしました。` : "");
     if (jans.length === 0) return;
 
     stopRequested.current = false;
@@ -340,28 +293,8 @@ export default function ArbitrageDashboard() {
       // 画面を閉じても、開き直したときに続きから再開できるよう、どこまで進んだかを保存する
       saveJson(QUEUE_KEY, { jans, next: index, savedAt: new Date().toISOString() } satisfies Queue);
       setRunning({ jan, index: index + 1, total: jans.length, jans });
-      const show = (note: string) => setRunning({ jan, index: index + 1, total: jans.length, jans, note });
-      const usesKeepa = options.force || !amazonCacheFor(jan);
-
-      // 残りトークンが少ないときは、エラーにせず回復を待ってから Keepa を呼ぶ（キャッシュを使う商品は待たない）
-      const tokens = tokensRef.current;
-      const estimated = estimateTokens(tokens);
-      if (usesKeepa && tokens && estimated !== undefined && estimated <= LOW_TOKENS) {
-        await waitWithCountdown(waitForTokensMs(tokens), (sec) => `Keepa のトークン回復待ち（残り約 ${estimateTokens(tokensRef.current) ?? estimated} トークン・${sec} 秒後に自動再開）…`, show);
-        if (stopRequested.current) break;
-        setRunning({ jan, index: index + 1, total: jans.length, jans });
-      }
-
       const started = Date.now();
-      let refillSec = await lookup(jan, options.force);
-      // それでも足りなかった（ほかの人・ほかの画面も同じキーを使っているなど）ときは、言われた時間待ってやり直す
-      if (refillSec !== undefined && !stopRequested.current) {
-        await waitWithCountdown((refillSec + 2) * 1000, (sec) => `Keepa のトークン回復待ち（${sec} 秒後に自動再開）…`, show);
-        if (!stopRequested.current) {
-          setRunning({ jan, index: index + 1, total: jans.length, jans });
-          refillSec = await lookup(jan, options.force);
-        }
-      }
+      await lookup(jan);
       const rest = MIN_GAP_MS - (Date.now() - started);
       if (rest > 0 && index < jans.length - 1) await wait(rest);
     }
@@ -408,7 +341,7 @@ export default function ArbitrageDashboard() {
     <main className="mx-auto w-full max-w-5xl space-y-6 px-4 pt-2 pb-[calc(2rem+env(safe-area-inset-bottom))] sm:pt-4">
       <header className="space-y-1">
         <div className="flex items-start justify-between gap-3">
-          <h1 className="text-xl font-bold sm:text-2xl">国内 3 モール 価格差リサーチ</h1>
+          <h1 className="text-xl font-bold sm:text-2xl">電脳せどり リサーチ（楽天・Yahoo!）</h1>
           <form method="post" action="/api/logout" className="shrink-0">
             <button type="submit" className="min-h-11 px-2 text-sm underline opacity-70 active:opacity-100">
               ログアウト
@@ -416,7 +349,7 @@ export default function ArbitrageDashboard() {
           </form>
         </div>
         <p className="text-sm opacity-80">
-          JAN コードで Amazon・楽天市場・Yahoo!ショッピングの同じ商品だけを照合し、ポイント還元と FBA 手数料を含めた利益が一番大きい「仕入れ先 ➔ 販売先」を自動で選びます。
+          JAN コードで楽天市場・Yahoo!ショッピングの同じ商品だけを照合し、ポイント・送料込みの最安仕入れ値を出します。Amazon は各商品の「Keepa で見る」で確認し、販売価格を入れると FBA で売ったときの利益も計算します。
         </p>
         <ConnectionStatus />
       </header>
@@ -459,8 +392,6 @@ export default function ArbitrageDashboard() {
           loadRakutenCredentials={loadRakutenCredentials}
           onStart={runBulk}
           busy={busy}
-          tokens={keepaTokens}
-          onTokensLeft={(left) => setKeepaTokens({ ...(tokensRef.current ?? {}), left, refillInMs: undefined })}
         />
       )}
 
@@ -488,7 +419,7 @@ export default function ArbitrageDashboard() {
         </div>
       )}
 
-      {running && <RunProgress running={running} found={foundInRun} tokens={keepaTokens} onStop={() => (stopRequested.current = true)} />}
+      {running && <RunProgress running={running} found={foundInRun} onStop={() => (stopRequested.current = true)} />}
       {runNotice && !running && <p className="text-xs opacity-70">{runNotice}</p>}
 
       {/* 登録した JAN */}
@@ -525,7 +456,7 @@ export default function ArbitrageDashboard() {
                     </div>
                     {errors[item.jan] && <div className="text-xs text-red-600">{errors[item.jan]}</div>}
                   </div>
-                  <button type="button" onClick={() => void runAll([item.jan], { force: true })} disabled={busy} className="min-h-11 px-2 text-sm underline disabled:opacity-40">
+                  <button type="button" onClick={() => void runAll([item.jan])} disabled={busy} className="min-h-11 px-2 text-sm underline disabled:opacity-40">
                     調べる
                   </button>
                   <button
@@ -556,7 +487,7 @@ export default function ArbitrageDashboard() {
             )}
             <label className="flex min-h-11 items-center gap-2 text-sm">
               <input type="checkbox" checked={skipRecent} onChange={(e) => setSkipRecent(e.target.checked)} className="h-5 w-5" />
-              {RECENT_HOURS} 時間以内に調べた商品は飛ばす（Keepa のトークン節約）
+              {RECENT_HOURS} 時間以内に調べた商品は飛ばす
             </label>
             <p className="text-xs opacity-60">
               スマホのブラウザの中で 1 件ずつ調べます。画面を閉じる・別のアプリに切り替えると止まりますが、開き直すと「続きから再開」できます。
@@ -586,7 +517,7 @@ export default function ArbitrageDashboard() {
             <select value={view.sort} onChange={(e) => setView({ ...view, sort: e.target.value as SortKey })} className={INPUT_CLASS}>
               <option value="profit">見込み利益順</option>
               <option value="margin">利益率順</option>
-              <option value="rank">回転率順</option>
+              <option value="price">仕入れ値の安い順</option>
             </select>
           </label>
           <label className="flex min-w-0 flex-col gap-1">
@@ -598,10 +529,6 @@ export default function ArbitrageDashboard() {
                 </option>
               ))}
             </select>
-          </label>
-          <label className="flex min-h-11 items-center gap-2">
-            <input type="checkbox" checked={view.noRiskOnly} onChange={(e) => setView({ ...view, noRiskOnly: e.target.checked })} className="h-5 w-5" />
-            リスクなしのみ
           </label>
           <label className="flex min-h-11 items-center gap-2">
             <input type="checkbox" checked={onlyTreasures} onChange={(e) => setOnlyTreasures(e.target.checked)} className="h-5 w-5" />
@@ -638,7 +565,22 @@ export default function ArbitrageDashboard() {
           <RouteSummary rows={visibleRows} />
           <ul className="space-y-4">
             {visibleRows.map((row) => (
-              <ResultCard key={row.item.jan} row={row} settings={settings} onRefresh={() => void runAll([row.item.jan], { force: true })} busy={busy} />
+              <ResultCard
+                key={row.item.jan}
+                row={row}
+                settings={settings}
+                onRefresh={() => void runAll([row.item.jan])}
+                busy={busy}
+                amazonPrice={amazonPrices[row.item.jan]}
+                onAmazonPrice={(price) =>
+                  setAmazonPrices((prev) => {
+                    const next = { ...prev };
+                    if (price) next[row.item.jan] = price;
+                    else delete next[row.item.jan];
+                    return next;
+                  })
+                }
+              />
             ))}
           </ul>
           </>
@@ -650,7 +592,7 @@ export default function ArbitrageDashboard() {
 
 // ---- 接続状況（API キーが設定されているか。値は扱わない） ----
 
-type ConfigStatus = { keepa: boolean; spApi: boolean; rakuten: boolean; yahoo: boolean; keepaLikeNames: string[]; vercelEnv?: string };
+type ConfigStatus = { rakuten: boolean; yahoo: boolean };
 
 function ConnectionStatus() {
   const [status, setStatus] = useState<ConfigStatus | null>(null);
@@ -662,68 +604,18 @@ function ConnectionStatus() {
   }, []);
   if (!status) return null;
 
-  const amazon = status.keepa || status.spApi;
-  const items: [string, boolean, string][] = [
-    ["Amazon", amazon, status.keepa ? (status.spApi ? "Keepa＋SP-API" : "Keepa") : status.spApi ? "SP-API" : "未設定"],
-    ["楽天", status.rakuten, status.rakuten ? "OK" : "未設定"],
-    ["Yahoo!", status.yahoo, status.yahoo ? "OK" : "未設定"],
+  const items: [string, boolean][] = [
+    ["楽天", status.rakuten],
+    ["Yahoo!", status.yahoo],
   ];
   return (
-    <div className="space-y-1 pt-1">
-      <div className="flex flex-wrap gap-1.5 text-xs">
-        {items.map(([label, ok, text]) => (
-          <span key={label} className={`rounded-full px-2 py-0.5 font-medium ${ok ? "bg-green-600/15 text-green-800 dark:text-green-300" : "bg-red-600/15 text-red-700 dark:text-red-300"}`}>
-            {ok ? "✓" : "✕"} {label}: {text}
-          </span>
-        ))}
-      </div>
-      {!amazon && (
-        <div className="rounded-lg border border-red-500/50 p-2 text-xs">
-          <p className="font-semibold text-red-600">Amazon（Keepa）のキーがこのサーバーから見えていません。</p>
-          {status.keepaLikeNames.length > 0 ? (
-            <p>
-              似た名前の環境変数 <span className="font-mono">{status.keepaLikeNames.join("・")}</span> があります。名前を
-              <span className="font-mono"> KEEPA_API_KEY </span>（すべて大文字）に変えてください。
-            </p>
-          ) : (
-            <p>Vercel の Settings → Environment Variables で次を確認してください。</p>
-          )}
-          <ol className="mt-1 list-decimal space-y-0.5 pl-5">
-            <li>
-              名前が <span className="font-mono">KEEPA_API_KEY</span>（すべて大文字・前後に空白なし）
-            </li>
-            <li>
-              対象の環境（Environments）に <span className="font-semibold">Production</span> のチェックが入っている
-              {status.vercelEnv && `（今開いているのは ${status.vercelEnv} 環境）`}
-            </li>
-            <li>
-              追加・変更したあと、Deployments 画面で最新のデプロイを <span className="font-semibold">Redeploy</span> した（環境変数は次のデプロイから反映されます）
-            </li>
-          </ol>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ---- Keepa の残りトークン（1 秒ごとに表示を更新） ----
-
-function TokenMeter({ tokens }: { tokens: TokenState }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const left = estimateTokens(tokens, now) ?? tokens.left;
-  const low = left <= LOW_TOKENS;
-  return (
-    <div className={`flex flex-wrap gap-x-3 text-xs ${low ? "font-semibold text-red-600" : "opacity-80"}`} role="status">
-      <span>Keepa 残り {left} トークン{tokens.refillPerMinute && now !== tokens.at ? "（見込み）" : ""}</span>
-      {tokens.refillPerMinute ? (
-        <span>
-          次の回復まで {secondsToNextRefill(tokens, now)} 秒（1 分ごとに +{tokens.refillPerMinute}）
+    <div className="flex flex-wrap gap-1.5 pt-1 text-xs">
+      {items.map(([label, ok]) => (
+        <span key={label} className={`rounded-full px-2 py-0.5 font-medium ${ok ? "bg-green-600/15 text-green-800 dark:text-green-300" : "bg-red-600/15 text-red-700 dark:text-red-300"}`}>
+          {ok ? "✓" : "✕"} {label}: {ok ? "OK" : "未設定"}
         </span>
-      ) : null}
+      ))}
+      <span className="rounded-full px-2 py-0.5 opacity-60">Amazon: Keepa で手動確認</span>
     </div>
   );
 }
@@ -733,12 +625,10 @@ function TokenMeter({ tokens }: { tokens: TokenState }) {
 function RunProgress({
   running,
   found,
-  tokens,
   onStop,
 }: {
   running: { jan: string; index: number; total: number; note?: string };
   found: number;
-  tokens: TokenState | null;
   onStop: () => void;
 }) {
   const percent = Math.round(((running.index - 1) / running.total) * 100);
@@ -764,7 +654,6 @@ function RunProgress({
       <div className="h-2 overflow-hidden rounded-full bg-black/10 dark:bg-white/15">
         <div className="h-full rounded-full bg-green-600 transition-[width]" style={{ width: `${percent}%` }} />
       </div>
-      {tokens && <TokenMeter tokens={tokens} />}
       <div className="text-xs opacity-60">画面を閉じると止まります（開き直すと続きから再開できます）。</div>
     </div>
   );
@@ -776,16 +665,17 @@ function BulkResearch({
   loadRakutenCredentials,
   onStart,
   busy,
-  tokens,
-  onTokensLeft,
 }: {
   loadRakutenCredentials: () => Promise<RakutenCredentials | null>;
   onStart: (found: JanItem[]) => Promise<void>;
   busy: boolean;
-  tokens: TokenState | null;
-  onTokensLeft: (left: number) => void;
 }) {
-  const [options, setOptions] = useState<BulkOptions>(() => ({ ...DEFAULT_BULK, ...loadJson<Partial<BulkOptions>>(BULK_KEY) }));
+  const [options, setOptions] = useState<BulkOptions>(() => {
+    const saved = { ...DEFAULT_BULK, ...loadJson<Partial<BulkOptions>>(BULK_KEY) };
+    // 以前の「Keepa条件抽出」は廃止したので外す
+    const sources = saved.sources.filter((s) => DISCOVERY_SOURCES.some((d) => d.id === s));
+    return { ...saved, sources: sources.length > 0 ? sources : DEFAULT_BULK.sources };
+  });
   const [log, setLog] = useState<string[]>([]);
   const [collecting, setCollecting] = useState(false);
   useEffect(() => saveJson(BULK_KEY, options), [options]);
@@ -816,13 +706,13 @@ function BulkResearch({
     return { items, message: `楽天 高ポイント: ${checked} 件のうち JAN が分かる商品 ${items.length} 件` };
   }
 
-  async function collectServer(source: "keepa" | "yahoo", limit: number): Promise<{ items: JanItem[]; message: string }> {
-    const label = source === "keepa" ? "Keepa条件抽出" : "Yahoo!ランキング";
+  async function collectYahoo(limit: number): Promise<{ items: JanItem[]; message: string }> {
+    const label = "Yahoo!ランキング";
     try {
       const res = await fetch("/api/discover", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source, category: options.category, limit }),
+        body: JSON.stringify({ source: "yahoo", category: options.category, limit }),
       });
       if (res.status === 401) {
         window.location.reload();
@@ -831,8 +721,7 @@ function BulkResearch({
       const body = await res.json();
       if (!res.ok) return { items: [], message: body.error ?? `${label}: 取得に失敗しました（HTTP ${res.status}）。` };
       const items = (body.items as { jan: string; title: string }[]).map((i) => ({ jan: i.jan, name: i.title.slice(0, 60) }));
-      if (typeof body.tokensLeft === "number") onTokensLeft(body.tokensLeft);
-      const extra = [...(body.warnings as string[]), body.tokensLeft !== undefined ? `残りトークン ${body.tokensLeft}` : ""].filter(Boolean);
+      const extra = body.warnings as string[];
       return { items, message: `${label}: ${items.length} 件${extra.length > 0 ? `（${extra.join("・")}）` : ""}` };
     } catch {
       return { items: [], message: `${label}: サーバーに接続できませんでした。` };
@@ -847,7 +736,7 @@ function BulkResearch({
     const per = Math.ceil(options.limit / options.sources.length);
     const found: JanItem[] = [];
     for (const source of DISCOVERY_SOURCES.map((s) => s.id).filter((id) => options.sources.includes(id))) {
-      const { items, message } = source === "rakuten" ? await collectRakuten(per) : await collectServer(source, per);
+      const { items, message } = source === "rakuten" ? await collectRakuten(per) : await collectYahoo(per);
       if (message) setLog((prev) => [...prev, message]);
       for (const item of items) if (!found.some((f) => f.jan === item.jan)) found.push(item);
     }
@@ -857,7 +746,7 @@ function BulkResearch({
       setLog((prev) => [...prev, "調べる商品が見つかりませんでした。カテゴリやソースを変えてください。"]);
       return;
     }
-    setLog((prev) => [...prev, `合計 ${targets.length} 件を 3 モールで比較します。`]);
+    setLog((prev) => [...prev, `合計 ${targets.length} 件を楽天・Yahoo! で比較します。`]);
     await onStart(targets);
   }
 
@@ -865,7 +754,7 @@ function BulkResearch({
     <section className="space-y-4 rounded-lg border border-black/10 p-4 dark:border-white/15">
       <div>
         <h2 className="font-semibold">全自動バルクリサーチ</h2>
-        <p className="text-xs opacity-70">型番・JAN の入力は不要です。条件に合う商品を自動で集め、JAN で 3 モールを一括比較します。</p>
+        <p className="text-xs opacity-70">型番・JAN の入力は不要です。条件に合う商品を自動で集め、JAN で楽天・Yahoo! を一括比較します。</p>
       </div>
 
       <fieldset className="space-y-1">
@@ -908,7 +797,6 @@ function BulkResearch({
         </label>
       </div>
 
-      {tokens && !busy && <TokenMeter tokens={tokens} />}
       <button type="button" onClick={() => void start()} disabled={busy || collecting || options.sources.length === 0} className={`${PRIMARY} w-full`}>
         {collecting ? "商品を集めています…" : "全自動リサーチ開始"}
       </button>
@@ -920,7 +808,7 @@ function BulkResearch({
         </ul>
       )}
       <p className="text-xs opacity-60">
-        Keepa条件抽出は Product Finder と ASIN→JAN の変換でトークンを使い、その後の比較でも 1 件ごとに使います。トークンが足りなくなると回復を待ってから続きを調べます。
+        集めた商品は JAN で楽天・Yahoo! の新品の最安値（ポイント・送料込みの実質価格）を比べます。Amazon は各商品の「Keepa で見る」から確認してください。
         楽天スーパーDEAL の商品を取り出す公開 API はないため、ポイント 5 倍以上の商品で代用しています。
       </p>
     </section>
@@ -1235,69 +1123,13 @@ function SettingsPanel({ settings, onChange }: { settings: ArbitrageSettings; on
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
             <NumberSetting label="利益（円以上）" value={settings.minProfitJpy} onCommit={(n) => set({ minProfitJpy: n })} />
             <NumberSetting label="利益率（%以上）" value={settings.minMarginPercent} onCommit={(n) => set({ minMarginPercent: n })} />
-            <label className="col-span-2 flex min-w-0 flex-col gap-1 text-sm lg:col-span-1">
-              <span>回転率（Amazon の月の販売回数）</span>
-              <select value={settings.minRank} onChange={(e) => set({ minRank: e.target.value as MinRank })} className={INPUT_CLASS}>
-                {MIN_RANKS.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
-            </label>
           </div>
-        </fieldset>
-
-        <fieldset className="space-y-2">
-          <legend className="mb-1 text-sm font-semibold">Amazon の販売価格・リスク判定（Keepa）</legend>
-          <label className="flex min-w-0 flex-col gap-1 text-sm">
-            <span>Keepa のデータを使い回す時間（トークン節約）</span>
-            <select value={settings.keepaCacheHours} onChange={(e) => set({ keepaCacheHours: Number(e.target.value) })} className={INPUT_CLASS}>
-              {[0, 6, 12, 24].map((h) => (
-                <option key={h} value={h}>
-                  {h === 0 ? "使い回さない（毎回 Keepa を呼ぶ）" : `${h} 時間`}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex min-h-11 items-center gap-2 text-sm">
-            <input type="checkbox" checked={settings.safePrice} onChange={(e) => set({ safePrice: e.target.checked })} className="h-5 w-5" />
-            カート価格と 90 日平均の低い方で計算する（安全値）
-          </label>
-          <label className="flex min-h-11 items-center gap-2 text-sm">
-            <input type="checkbox" checked={settings.excludeRisky} onChange={(e) => set({ excludeRisky: e.target.checked })} className="h-5 w-5" />
-            危険（赤）のリスクがある商品は推奨から外す
-          </label>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <NumberSetting
-              label="FBA プレミアム（%・最大 10）"
-              value={settings.fbaPremiumPercent}
-              onCommit={(n) => set({ fbaPremiumPercent: Math.min(10, n) })}
-            />
-            <NumberSetting label="出品者急増（7〜14日で%以上）" value={settings.offerSurgePercent} onCommit={(n) => set({ offerSurgePercent: n })} />
-            <NumberSetting
-              label="Amazon本体のカート獲得（90日で%以上）"
-              value={settings.amazonReturnSharePercent}
-              onCommit={(n) => set({ amazonReturnSharePercent: n })}
-            />
-            <NumberSetting
-              label="不人気バリエーション（シェア%未満）"
-              value={settings.variationMinSharePercent}
-              onCommit={(n) => set({ variationMinSharePercent: n })}
-            />
-          </div>
-          <p className="text-xs opacity-60">
-            FBA プレミアム: カートを自己発送の出品者が持っているとき、FBA なら数 % 高くてもカートを取れるので、その分を販売価格に上乗せします（FBA の最安値は超えません）。
-            出品者急増: 楽天・Yahoo! のセール後などに新品出品者が急に増えた商品は値崩れしやすいので外します。
-            Amazon本体の復帰: 過去 90 日に Amazon 本体がよくカートを取っていて今だけ在庫切れの商品は、補充されると売れなくなるので外します。
-            不人気バリエーション: 色・サイズ違いの中でこの商品の購入数（なければレビュー数）のシェアが低いものを外します。
-          </p>
         </fieldset>
 
         <fieldset className="space-y-2">
           <legend className="mb-1 text-sm font-semibold">仕入れ（ポイント・送料）</legend>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
-            {MALLS.map((m) => (
+            {BUY_MALLS.map((m) => (
               <NumberSetting
                 key={m}
                 label={`${MALL_LABEL[m]} 上乗せポイント（%）`}
@@ -1309,7 +1141,7 @@ function SettingsPanel({ settings, onChange }: { settings: ArbitrageSettings; on
             <NumberSetting label="送料別のときの送料（円）" value={settings.buyShippingJpy} onCommit={(n) => set({ buyShippingJpy: n })} />
           </div>
           <p className="text-xs opacity-60">
-            各モールが表示しているポイント（楽天: ショップの倍率、Yahoo!: ストアのボーナス、Amazon: 出品のポイント）は自動で計算します。
+            各モールが表示しているポイント（楽天: ショップの倍率、Yahoo!: ストアポイント（PayPay ポイント））は自動で計算します。
             楽天 SPU・LYP 会員・キャンペーンなど人によって違う分を「上乗せ」に入れてください（例: 楽天 SPU が 7 倍なら 6）。
             期間限定ポイントを割り引いて考えるときは「ポイントの価値」を下げます。
           </p>
@@ -1322,11 +1154,12 @@ function SettingsPanel({ settings, onChange }: { settings: ArbitrageSettings; on
               <label className="flex min-h-11 items-center gap-2 text-sm font-medium">
                 <input type="checkbox" checked={settings.sell[m].enabled} onChange={(e) => setSell(m, { enabled: e.target.checked })} className="h-5 w-5" />
                 {SELL_LABEL[m]} で販売する
+                {m === "amazon" && <span className="text-xs font-normal opacity-60">（Keepa で確認した価格を入れた商品だけ）</span>}
               </label>
               {settings.sell[m].enabled && (
                 <div className="grid grid-cols-2 gap-3">
                   <NumberSetting
-                    label={m === "amazon" ? "販売手数料（%・見積もれないとき）" : "販売手数料の合計（%）"}
+                    label={m === "amazon" ? "販売手数料（%）" : "販売手数料の合計（%）"}
                     value={settings.sell[m].feePercent}
                     onCommit={(n) => setSell(m, { feePercent: n })}
                   />
@@ -1337,7 +1170,7 @@ function SettingsPanel({ settings, onChange }: { settings: ArbitrageSettings; on
                   />
                   {m === "amazon" && (
                     <NumberSetting
-                      label="FBA 配送代行手数料（円・見積もれないとき）"
+                      label="FBA 配送代行手数料（円/個）"
                       value={settings.amazonFallbackFbaFeeJpy}
                       onCommit={(n) => set({ amazonFallbackFbaFeeJpy: n })}
                     />
@@ -1347,7 +1180,7 @@ function SettingsPanel({ settings, onChange }: { settings: ArbitrageSettings; on
             </div>
           ))}
           <p className="text-xs opacity-60">
-            Amazon の手数料（販売手数料＋FBA 配送代行手数料）は Keepa（または SP-API）のデータで商品ごとに計算します。楽天・Yahoo! の手数料は、
+            Amazon は「販売価格 × 販売手数料 % ＋ FBA 配送代行手数料 ＋ 納品送料」で計算します（カテゴリやサイズで違うので、Keepa の手数料欄を見て合わせてください）。楽天・Yahoo! の手数料は、
             システム利用料・決済手数料・ポイント原資などを合計した割合を入れてください。出店していないモールはチェックを外します。
           </p>
         </fieldset>
@@ -1394,33 +1227,14 @@ function LinkButton({ href, children, primary = false }: { href: string; childre
   );
 }
 
-function BestRoute({ best }: { best: Route | undefined }) {
-  if (!best) {
-    return (
-      <div className="rounded-lg border border-black/15 p-3 text-sm opacity-80 dark:border-white/20">
-        比べられるルートがありません（出品が見つかったモールが 1 つ以下か、販売先をすべてオフにしています）。
-      </div>
-    );
-  }
+function BestRoute({ best }: { best: Route }) {
   const good = best.isTreasure;
   const positive = best.profitJpy > 0;
-  const heading = good
-    ? "[推奨] 最適ルート"
-    : best.blockedByRisk
-      ? "最適ルート（リスクありのため推奨外）"
-      : positive
-        ? "最適ルート（条件未達）"
-        : "最適ルート（利益なし）";
+  const heading = good ? "[推奨] 最適ルート" : positive ? "最適ルート（条件未達）" : "最適ルート（利益なし）";
   return (
     <div
       className={`rounded-lg p-3 ${
-        good
-          ? "bg-green-600 text-white"
-          : best.blockedByRisk
-            ? "border-2 border-red-500/70"
-            : positive
-              ? "border-2 border-amber-500/70"
-              : "border border-black/15 dark:border-white/20"
+        good ? "bg-green-600 text-white" : positive ? "border-2 border-amber-500/70" : "border border-black/15 dark:border-white/20"
       }`}
     >
       <div className="text-xs font-semibold opacity-90">{heading}</div>
@@ -1428,94 +1242,55 @@ function BestRoute({ best }: { best: Route | undefined }) {
       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-sm">
         <span className={`text-lg font-bold ${good ? "" : positive ? "text-green-600" : "text-red-600"}`}>見込み利益 {yen.format(best.profitJpy)}</span>
         <span>（利益率 {best.marginPercent.toFixed(1)}%）</span>
-        <span>／ 回転率</span>
-        <span className={`rounded px-1.5 text-xs font-bold ${good ? "bg-white text-green-700" : RANK_STYLE[best.rank]}`} title={RANK_INFO[best.rank].hint}>
-          {RANK_INFO[best.rank].label}
-        </span>
-        <span>{RANK_WORD[best.rank]}</span>
       </div>
-      <div className="mt-1 flex flex-wrap items-center gap-1 text-sm">
-        <span>リスク:</span>
-        {best.risks.length === 0 ? <span className="font-semibold">なし</span> : <RiskBadges risks={best.risks} onDark={good} />}
-      </div>
+      {best.sell === "amazon" && <div className="mt-1 text-xs opacity-90">回転率・ライバル数は Keepa で確認してください。</div>}
     </div>
   );
 }
 
-/** リスクのバッジ（危険は赤、注意は黄） */
-function RiskBadges({ risks, onDark = false }: { risks: Risk[]; onDark?: boolean }) {
+/** Amazon の確認（API は使わない）: Amazon・Keepa へのリンクと、Keepa で見た販売価格の入力欄 */
+function AmazonManual({ jan, priceJpy, onChange }: { jan: string; priceJpy: number | undefined; onChange: (priceJpy: number | undefined) => void }) {
+  const [text, setText] = useState(priceJpy ? String(priceJpy) : "");
   return (
-    <>
-      {risks.map((r) => (
-        <span
-          key={r.code}
-          title={r.detail}
-          className={`rounded px-1.5 py-0.5 text-xs font-bold ${
-            r.level === "danger" ? "bg-red-600 text-white" : onDark ? "bg-white text-amber-700" : "bg-amber-400 text-black"
-          }`}
-        >
-          {r.level === "danger" ? "⛔" : "⚠"} {r.label}
-        </span>
-      ))}
-    </>
-  );
-}
-
-/** Amazon で売るときのリスクの説明 */
-function RiskList({ risks }: { risks: Risk[] }) {
-  if (risks.length === 0) return null;
-  return (
-    <ul className="space-y-1 rounded-lg border border-red-500/40 p-3 text-xs">
-      {risks.map((r) => (
-        <li key={r.code}>
-          <span className={`font-bold ${r.level === "danger" ? "text-red-600" : "text-amber-700 dark:text-amber-400"}`}>
-            {r.level === "danger" ? "⛔" : "⚠"} {r.label}
-          </span>
-          ：{r.detail}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-/** Amazon の売れ行き（Keepa のランキング変動回数など）と回転率の判定 */
-function SalesVelocity({ amazon, rank }: { amazon: NonNullable<JanLookup["amazon"]>; rank: TurnoverRank }) {
-  const monthly = monthlySalesEstimate(amazon);
-  const fast = rank === "S" || rank === "A";
-  const slow = rank === "C";
-  return (
-    <div className="flex items-start gap-2 rounded-lg bg-black/[.04] p-3 text-sm dark:bg-white/[.06]">
-      <span className={`shrink-0 rounded px-1.5 text-xs font-bold ${RANK_STYLE[rank]}`} title={RANK_INFO[rank].hint}>
-        {RANK_INFO[rank].label}
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className={`font-semibold ${fast ? "text-green-700 dark:text-green-400" : slow ? "text-red-600" : ""}`}>
-          {fast ? "高回転（すぐ売れる）" : slow ? "低回転（売れにくい）" : rank === "B" ? "中回転" : "回転率不明"}
-          {monthly !== undefined && <span className="font-normal"> ・ 月 約 {monthly} 個</span>}
-        </div>
-        <div className="text-xs opacity-70">
-          {[
-            amazon.salesRankDrops30 !== undefined && `ランキング変動 30日 ${amazon.salesRankDrops30}回`,
-            amazon.salesRankDrops90 !== undefined && `90日 ${amazon.salesRankDrops90}回`,
-            amazon.monthlySold !== undefined && `Amazon 表示「過去1か月で${amazon.monthlySold}点以上購入」`,
-            amazon.salesRank !== undefined && `${amazon.salesRankCategory ?? ""} ${amazon.salesRank.toLocaleString()}位`,
-            amazon.offerCount !== undefined && `新品出品者 ${amazon.offerCount}人`,
-          ]
-            .filter(Boolean)
-            .join(" ・ ") || "売れ行きのデータがありません"}
+    <div className="space-y-2 rounded-lg border border-black/10 p-3 text-sm dark:border-white/15">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium">Amazon（Keepa で確認）</span>
+        <div className="flex gap-2">
+          <a href={amazonSearchUrl(jan)} target="_blank" rel="noopener noreferrer" className="flex min-h-11 items-center rounded-lg border border-black/25 px-3 text-xs font-medium dark:border-white/30">
+            Amazon で見る
+          </a>
+          <a href={keepaSearchUrl(jan)} target="_blank" rel="noopener noreferrer" className="flex min-h-11 items-center rounded-lg border border-black/25 px-3 text-xs font-medium dark:border-white/30">
+            Keepa で見る
+          </a>
         </div>
       </div>
+      <label className="flex items-center gap-2">
+        <span className="shrink-0 text-xs opacity-80">販売価格（円）</span>
+        <input
+          type="text"
+          inputMode="numeric"
+          autoComplete="off"
+          placeholder="カート価格を入れると FBA 利益を計算"
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            const n = Number(e.target.value.replace(/[,，円¥￥\s]/g, ""));
+            onChange(Number.isFinite(n) && n > 0 ? Math.round(n) : undefined);
+          }}
+          className={`${INPUT_CLASS} min-w-0 flex-1`}
+        />
+      </label>
     </div>
   );
 }
 
-/** 結果の上に出す、最適ルートの一覧（タップで各商品へ移動） */
+/** 結果の上に出す、利益の出る商品の一覧（タップで各商品へ移動） */
 function RouteSummary({ rows }: { rows: Row[] }) {
   const withRoute = rows.filter((r) => r.analysis.best && r.analysis.best.profitJpy > 0);
   if (withRoute.length === 0) return null;
   return (
     <div className="rounded-lg border border-black/10 dark:border-white/15">
-      <div className="px-3 pt-2 text-sm font-semibold">最適ルート一覧（利益 × 回転率）</div>
+      <div className="px-3 pt-2 text-sm font-semibold">利益の出る商品（{withRoute.length}件）</div>
       <ol className="divide-y divide-black/10 dark:divide-white/15">
         {withRoute.map(({ item, lookup, analysis }) => {
           const best = analysis.best!;
@@ -1525,7 +1300,6 @@ function RouteSummary({ rows }: { rows: Row[] }) {
                 href={`#jan-${lookup.jan}`}
                 className={`flex min-h-12 items-center gap-2 px-3 py-2 text-sm ${best.isTreasure ? "bg-green-600/10" : ""}`}
               >
-                <span className={`shrink-0 rounded px-1.5 text-xs font-bold ${RANK_STYLE[best.rank]}`}>{RANK_INFO[best.rank].label}</span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate">{lookup.title || item.name || lookup.jan}</span>
                   <span className={`block text-xs ${best.isTreasure ? "font-semibold text-green-700 dark:text-green-400" : "opacity-70"}`}>
@@ -1534,18 +1308,7 @@ function RouteSummary({ rows }: { rows: Row[] }) {
                 </span>
                 <span className="shrink-0 text-right">
                   <span className={`block font-bold ${best.isTreasure ? "text-green-600" : ""}`}>{yen.format(best.profitJpy)}</span>
-                  <span className="block text-xs opacity-60">
-                    {best.marginPercent.toFixed(0)}% ・ {RANK_WORD[best.rank]}
-                  </span>
-                  <span className="block text-xs">
-                    {best.risks.length === 0 ? (
-                      <span className="opacity-60">リスクなし</span>
-                    ) : (
-                      <span className={best.risks.some((r) => r.level === "danger") ? "font-semibold text-red-600" : "text-amber-700 dark:text-amber-400"}>
-                        {best.risks.some((r) => r.level === "danger") ? "⛔" : "⚠"} {best.risks.map((r) => r.label).join("・")}
-                      </span>
-                    )}
-                  </span>
+                  <span className="block text-xs opacity-60">{best.marginPercent.toFixed(0)}%</span>
                 </span>
               </a>
             </li>
@@ -1556,10 +1319,27 @@ function RouteSummary({ rows }: { rows: Row[] }) {
   );
 }
 
-function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: ArbitrageSettings; onRefresh: () => void; busy: boolean }) {
+function ResultCard({
+  row,
+  settings,
+  onRefresh,
+  busy,
+  amazonPrice,
+  onAmazonPrice,
+}: {
+  row: Row;
+  settings: ArbitrageSettings;
+  onRefresh: () => void;
+  busy: boolean;
+  amazonPrice: number | undefined;
+  onAmazonPrice: (priceJpy: number | undefined) => void;
+}) {
   const { item, lookup, analysis } = row;
   const { best } = analysis;
-  const amazon = lookup.amazon;
+  // 楽天・Yahoo! の中で、ポイント・送料込みの実質価格が一番安い仕入れ先
+  const cheapestBuy = BUY_MALLS.map((m) => bestBuyOption(lookup.offers[m], settings))
+    .filter((o): o is NonNullable<typeof o> => !!o)
+    .sort((a, b) => a.netJpy - b.netJpy)[0];
 
   return (
     <li id={`jan-${lookup.jan}`} className={`scroll-mt-4 space-y-3 rounded-lg border p-4 ${best?.isTreasure ? "border-green-600/60" : "border-black/10 dark:border-white/15"}`}>
@@ -1584,22 +1364,26 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
         </div>
       </div>
 
-      <BestRoute best={best} />
-      {(() => {
-        // 最適ルートより利益が大きいのに、リスクで外したルート（なぜ選ばれなかったかを見せる）
-        const blocked = analysis.routes.filter((r) => r.blockedByRisk && r.profitJpy > 0 && r !== best && r.profitJpy > (best?.profitJpy ?? -Infinity));
-        if (blocked.length === 0) return null;
-        const top = blocked[0];
-        return (
-          <p className="rounded-lg border border-red-500/50 p-2 text-xs">
-            <span className="font-semibold text-red-600">⛔ リスクで除外:</span> {routeLabel(top)}（見込み利益 {yen.format(top.profitJpy)}）—{" "}
-            {top.risks
-              .filter((r) => r.level === "danger")
-              .map((r) => r.label)
-              .join("・")}
-          </p>
-        );
-      })()}
+      {cheapestBuy ? (
+        <div className="rounded-lg bg-black/[.04] p-3 text-sm dark:bg-white/[.06]">
+          <div className="text-xs opacity-70">最安仕入れ（ポイント・送料込みの実質価格）</div>
+          <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+            <span className="text-lg font-bold">{yen.format(cheapestBuy.netJpy)}</span>
+            <span className="text-xs opacity-80">
+              {MALL_LABEL[cheapestBuy.offer.mall]} {cheapestBuy.offer.shopName} ・ {yen.format(cheapestBuy.offer.priceJpy)} ・{" "}
+              {shippingNote(cheapestBuy.offer, settings.buyShippingJpy)}
+              {cheapestBuy.pointsJpy > 0 && ` ・ ポイント −${yen.format(cheapestBuy.pointsJpy)}`}
+            </span>
+          </div>
+        </div>
+      ) : (
+        <p className="rounded-lg border border-black/15 p-3 text-sm opacity-80 dark:border-white/20">楽天・Yahoo! に新品・在庫ありの出品がありませんでした。</p>
+      )}
+
+      {/* Amazon は API を使わず、Keepa で確認した販売価格を入れてもらう */}
+      <AmazonManual jan={lookup.jan} priceJpy={amazonPrice} onChange={onAmazonPrice} />
+
+      {best && <BestRoute best={best} />}
 
       {best && (
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
@@ -1616,26 +1400,16 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
           <dd className="text-right">
             {yen.format(best.sellPriceJpy)}
             <span className="block text-xs opacity-60">
-              {best.sell === "amazon"
-                ? best.sellPriceNotes.length > 0
-                  ? best.sellPriceNotes.join(" ・ ")
-                  : amazon?.buyBoxPriceJpy === best.sellPriceJpy
-                    ? "Amazon のカート価格"
-                    : "Amazon の FBA 最安値"
-                : `${SELL_LABEL[best.sell]}の最安値`}{" "}
-              ・ 手数料 −{yen.format(best.sellFeesJpy)}
-              {best.sell === "amazon" && (best.feesFromApi ? "（販売手数料＋FBA 手数料）" : "（設定の割合）")} ・ 送料 −{yen.format(best.sellShippingJpy)}
+              {best.sell === "amazon" ? "入力した Amazon の販売価格" : `${SELL_LABEL[best.sell]}の最安値`} ・ 手数料 −{yen.format(best.sellFeesJpy)}
+              {best.sell === "amazon" && "（販売手数料＋FBA 配送代行手数料）"} ・ 送料 −{yen.format(best.sellShippingJpy)}
             </span>
           </dd>
         </dl>
       )}
 
-      {amazon && <SalesVelocity amazon={amazon} rank={analysis.amazonRank} />}
-      <RiskList risks={analysis.amazonRisks} />
-
-      {/* 3 モールの価格と在庫 */}
+      {/* 楽天・Yahoo! の価格と在庫 */}
       <div className="divide-y divide-black/10 rounded-lg border border-black/10 text-sm dark:divide-white/15 dark:border-white/15">
-        {MALLS.map((m) => {
+        {BUY_MALLS.map((m) => {
           const offers = lookup.offers[m];
           const cheapest = offers[0];
           const isBuy = best?.buy === m;
@@ -1647,28 +1421,19 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
                 {(isBuy || isSell) && <span className="block text-xs font-semibold text-green-700 dark:text-green-400">{isBuy ? "仕入れ" : "販売"}</span>}
               </div>
               <div className="min-w-0 flex-1 text-xs">
-                {m === "amazon" && !amazon ? (
-                  <span className="opacity-60">データなし</span>
-                ) : offers.length === 0 && !(m === "amazon" && amazon?.lowestPriceJpy) ? (
+                {offers.length === 0 ? (
                   <span className="opacity-60">在庫なし・出品なし</span>
                 ) : (
                   <>
-                    <span className="text-sm font-semibold">
-                      {cheapest ? yen.format(cheapest.priceJpy) : amazon?.lowestPriceJpy !== undefined && yen.format(amazon.lowestPriceJpy)}
-                    </span>
-                    {cheapest && cheapest.pointsJpy > 0 && <span className="opacity-70"> （{cheapest.pointsJpy}pt）</span>}
-                    <span className="block opacity-60">
-                      在庫あり {m === "amazon" ? (amazon?.offerCount ?? offers.length) : offers.length}件
-                      {m === "amazon" && amazon?.lowestFbaPriceJpy !== undefined && ` ・ FBA 最安 ${yen.format(amazon.lowestFbaPriceJpy)}`}
-                      {m === "amazon" && amazon?.salesRank !== undefined && ` ・ ${amazon.salesRankCategory ?? ""} ${amazon.salesRank.toLocaleString()}位`}
-                      {m === "amazon" && monthlySalesEstimate(amazon) !== undefined && ` ・ 月 ${monthlySalesEstimate(amazon)} 回販売`}
-                    </span>
+                    <span className="text-sm font-semibold">{yen.format(cheapest.priceJpy)}</span>
+                    {cheapest.pointsJpy > 0 && <span className="opacity-70"> （{cheapest.pointsJpy}pt）</span>}
+                    <span className="block opacity-60">在庫あり {offers.length}件</span>
                   </>
                 )}
               </div>
-              {(cheapest?.url ?? (m === "amazon" ? amazon?.url : undefined)) && (
+              {cheapest?.url && (
                 <a
-                  href={cheapest?.url ?? amazon!.url}
+                  href={cheapest.url}
                   target="_blank"
                   rel="noopener noreferrer"
                   className={`flex min-h-11 shrink-0 items-center rounded-lg px-3 text-xs font-medium ${
@@ -1683,13 +1448,10 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
         })}
       </div>
 
-      {best && (
-        <div className="grid grid-cols-2 gap-2">
-          <LinkButton href={best.buyOption.offer.url} primary>
-            {MALL_LABEL[best.buy]}で仕入れる
-          </LinkButton>
-          {amazon ? <LinkButton href={amazon.url}>Amazon 商品ページ</LinkButton> : <span />}
-        </div>
+      {cheapestBuy && (
+        <LinkButton href={cheapestBuy.offer.url} primary>
+          {MALL_LABEL[cheapestBuy.offer.mall]}で仕入れる（{yen.format(cheapestBuy.offer.priceJpy)}）
+        </LinkButton>
       )}
 
       {analysis.routes.length > 1 && (
@@ -1701,7 +1463,6 @@ function ResultCard({ row, settings, onRefresh, busy }: { row: Row; settings: Ar
                 <tr key={`${r.buy}-${r.sell}`} className="border-t border-black/10 dark:border-white/15">
                   <td className="py-2">
                     {routeLabel(r)}
-                    {r.blockedByRisk && <span className="ml-1 font-semibold text-red-600">⛔ リスクで除外</span>}
                   </td>
                   <td className={`py-2 text-right font-semibold ${r.profitJpy >= 0 ? "text-green-600" : "text-red-600"}`}>{yen.format(r.profitJpy)}</td>
                   <td className="py-2 text-right opacity-70">{r.marginPercent.toFixed(1)}%</td>

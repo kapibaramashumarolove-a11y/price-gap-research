@@ -83,7 +83,9 @@ describe("lookupJan", () => {
     expect(result.title).toBe("スイッチ 本体");
     // 画面に返す出品には検索用の文章を含めない
     expect(result.offers.rakuten[0]).not.toHaveProperty("searchText");
-    expect(result.warnings).toEqual([expect.stringMatching(/KEEPA_API_KEY が見えない/)]);
+    // Amazon は API で調べない（Keepa で手動確認）ので注意も出さない
+    expect(result.warnings).toEqual([]);
+    expect(result.amazon).toBeUndefined();
     expect(result.fetchedAt).toBe("2026-10-07T00:00:00.000Z");
   });
 
@@ -110,44 +112,25 @@ describe("lookupJan", () => {
     expect(result.excludedUsed).toBe(3);
   });
 
-  it("Amazon の商品名を優先し、Amazon の商品自体がセット商品ならセット表記で除かない", async () => {
-    const result = await lookupJan(JAN, { offers: [] }, {
-      amazon: async () => ({
-        product: { asin: "B0", title: "天然水 500ml×24本 ケース販売", url: "https://www.amazon.co.jp/dp/B0", imageUrl: "https://m.media-amazon.com/a.jpg" },
-        offers: [],
-        warnings: ["Amazon: テスト"],
-      }),
-      yahoo: async () => [raw({ mall: "yahoo", title: "天然水 500ml×24本 ケース販売", priceJpy: 2000, jan: JAN })],
-      now,
-    });
-    expect(result.title).toBe("天然水 500ml×24本 ケース販売");
-    expect(result.imageUrl).toBe("https://m.media-amazon.com/a.jpg");
+  it("JAN が一致する出品がすべてセット表記なら、その JAN 自体がセット商品なので除かない", async () => {
+    const result = await lookupJan(
+      JAN,
+      { offers: [raw({ mall: "rakuten", title: "天然水 500ml×24本 ケース販売", priceJpy: 2100, searchText: `JAN:${JAN}` })] },
+      { yahoo: async () => [raw({ mall: "yahoo", title: "天然水 500ml 24本入×2ケース", priceJpy: 2000, jan: JAN })], now },
+    );
     expect(result.offers.yahoo).toHaveLength(1);
+    expect(result.offers.rakuten).toHaveLength(1);
     expect(result.excludedSets).toBe(0);
-    expect(result.warnings).toEqual(["Amazon: テスト"]);
-  });
-
-  it("Amazon のデータをキャッシュ用に返す（キャッシュを使ったときは元の取得時刻のまま）", async () => {
-    const product = { asin: "B0", title: "x", url: "https://www.amazon.co.jp/dp/B0" };
-    const fresh = await lookupJan(JAN, { offers: [] }, { amazon: async () => ({ product, offers: [], warnings: [], fetchedAt: "2026-10-07T00:00:00.000Z" }), now });
-    expect(fresh.amazonCache).toEqual({ product, offers: [], fetchedAt: "2026-10-07T00:00:00.000Z" });
-    const cached = await lookupJan(JAN, { offers: [] }, { amazon: async () => ({ product, offers: [], warnings: [], fetchedAt: "2026-10-06T00:00:00.000Z", fromCache: true }), now });
-    expect(cached).toMatchObject({ amazonFromCache: true, amazonCache: { fetchedAt: "2026-10-06T00:00:00.000Z" } });
-    // Amazon を調べられなかったときは返さない
-    expect((await lookupJan(JAN, { offers: [] }, { now })).amazonCache).toBeUndefined();
   });
 
   it("モールごとの失敗は注意にして、ほかのモールの結果は返す", async () => {
     const result = await lookupJan(JAN, { error: "楽天: アクセスが拒否されました" }, {
-      amazon: async () => {
-        throw new Error("Amazon: 取得に失敗しました（InvalidInput）。");
-      },
       yahoo: async () => {
         throw new Error("secret=xxx を含む内部エラー");
       },
       now,
     });
-    expect(result.warnings).toEqual(["Amazon: 取得に失敗しました（InvalidInput）。", "Yahoo!: 取得に失敗しました。", "楽天: アクセスが拒否されました"]);
+    expect(result.warnings).toEqual(["Yahoo!: 取得に失敗しました。", "楽天: アクセスが拒否されました"]);
   });
 
   it("ブラウザの楽天の結果がなければ、サーバーから楽天を調べる", async () => {

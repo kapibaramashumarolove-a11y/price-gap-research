@@ -3,15 +3,9 @@ import { configStatus } from "./status";
 
 describe("configStatus", () => {
   it("キーが設定されているかだけを返し、値は返さない", () => {
-    const status = configStatus({ KEEPA_API_KEY: "secret-keepa", YAHOO_CLIENT_ID: "secret-yahoo", VERCEL_ENV: "production" });
-    expect(status).toEqual({ keepa: true, spApi: false, rakuten: false, yahoo: true, keepaLikeNames: [], vercelEnv: "production" });
+    const status = configStatus({ RAKUTEN_APP_ID: "secret-app", YAHOO_CLIENT_ID: "secret-yahoo" });
+    expect(status).toEqual({ rakuten: true, yahoo: true });
     expect(JSON.stringify(status)).not.toContain("secret");
-  });
-
-  it("KEEPA_API_KEY の名前違いを見つける（空白だけの値は未設定扱い）", () => {
-    expect(configStatus({ KEEPA_KEY: "x", keepa_api_key: "y", KEEPA_API_KEY: "  ", SEND_KEEPALIVES: "1" })).toMatchObject({
-      keepa: false,
-      keepaLikeNames: ["KEEPA_KEY", "keepa_api_key"],
-    });
+    expect(configStatus({})).toEqual({ rakuten: false, yahoo: false });
   });
 });
