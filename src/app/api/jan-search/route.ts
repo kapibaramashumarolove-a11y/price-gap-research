@@ -1,6 +1,6 @@
 // POST /api/jan-search  キーワードから JAN を探す（Yahoo!ショッピングの商品データの JAN を使う）。
 // 本文（JSON）: { keyword: "ニンテンドースイッチ" }
-// 応答: { items: { jan, title, imageUrl?, minPriceJpy, count }[] }（見つかった出品の多い順）
+// 応答: { items: JanCandidate[] }（型番一致 → 付属品でない → 出品の多い順。src/lib/janSearch.ts）
 
 import type { NextRequest } from "next/server";
 import { AUTH_COOKIE, isAuthenticated } from "@/lib/auth";
@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
   if (!keyword) return Response.json({ error: "キーワードを入力してください。" }, { status: 400 });
 
   try {
-    return Response.json({ items: findJansByKeyword(await searchYahoo({ keyword })) }, { headers: { "Cache-Control": "no-store" } });
+    return Response.json({ items: findJansByKeyword(await searchYahoo({ keyword }), keyword) }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     if (err instanceof DomesticApiError) return Response.json({ error: err.message }, { status: 502 });
     console.error("jan search failed:", err);

@@ -18,7 +18,8 @@ import {
 } from "@/lib/discovery";
 import { containsJan, extractJans, normalizeJan } from "@/lib/jan";
 import { decodeCsvBytes, janListToCsv, mergeJanItems, parseJanList, type JanItem, type JanListParseResult } from "@/lib/janList";
-import type { JanCandidate } from "@/lib/janSearch";
+import { bestCandidate, findJansByKeyword, mergeCandidates, type JanCandidate } from "@/lib/janSearch";
+import { decodeJanFromImage, loadImage, toUploadDataUrl } from "@/lib/photoClient";
 import {
   DEFAULT_ARBITRAGE_SETTINGS,
   MALL_LABEL,
@@ -302,6 +303,10 @@ export default function ArbitrageDashboard() {
     saveJson(QUEUE_KEY, null);
     releaseScreen();
     setRunning(null);
+    // 1 件だけ調べたときは、その結果までスクロールする
+    if (jans.length === 1) {
+      setTimeout(() => document.getElementById(`jan-${jans[0]}`)?.scrollIntoView({ behavior: "smooth", block: "start" }), 150);
+    }
   }
 
   /** 全自動リサーチで集めた商品を一覧に足し、まとめて調べる */
@@ -349,7 +354,7 @@ export default function ArbitrageDashboard() {
           </form>
         </div>
         <p className="text-sm opacity-80">
-          JAN コードで楽天市場・Yahoo!ショッピングの同じ商品だけを照合し、ポイント・送料込みの最安仕入れ値を出します。Amazon は各商品の「Keepa で見る」で確認し、販売価格を入れると FBA で売ったときの利益も計算します。
+          楽天・Yahoo! の最安仕入れ値（ポイント・送料込み）を JAN で照合して調べます。Amazon は各商品の「Keepa で見る」で確認できます。
         </p>
         <ConnectionStatus />
       </header>
@@ -358,7 +363,7 @@ export default function ArbitrageDashboard() {
       <div role="tablist" className="grid grid-cols-2 gap-1 rounded-lg bg-black/[.06] p-1 dark:bg-white/[.08]">
         {(
           [
-            ["single", "単体JAN検索"],
+            ["single", "検索（JAN・型番・写真）"],
             ["bulk", "全自動バルクリサーチ"],
           ] as const
         ).map(([id, label]) => (
@@ -377,6 +382,14 @@ export default function ArbitrageDashboard() {
 
       {mode === "single" ? (
         <>
+          <QuickSearch
+            loadRakutenCredentials={loadRakutenCredentials}
+            busy={busy}
+            onResearch={(found) => {
+              addItems(found);
+              void runAll(found.map((i) => i.jan));
+            }}
+          />
           <AddJans
             onAdd={addItems}
             onAddAndRun={(added) => {
@@ -592,7 +605,7 @@ export default function ArbitrageDashboard() {
 
 // ---- 接続状況（API キーが設定されているか。値は扱わない） ----
 
-type ConfigStatus = { rakuten: boolean; yahoo: boolean };
+type ConfigStatus = { rakuten: boolean; yahoo: boolean; photoAi?: boolean };
 
 function ConnectionStatus() {
   const [status, setStatus] = useState<ConfigStatus | null>(null);
@@ -615,6 +628,9 @@ function ConnectionStatus() {
           {ok ? "✓" : "✕"} {label}: {ok ? "OK" : "未設定"}
         </span>
       ))}
+      <span className={`rounded-full px-2 py-0.5 ${status.photoAi ? "bg-green-600/15 font-medium text-green-800 dark:text-green-300" : "opacity-60"}`}>
+        {status.photoAi ? "✓ 写真AI: OK" : "写真AI: 未設定（バーコードは読めます）"}
+      </span>
       <span className="rounded-full px-2 py-0.5 opacity-60">Amazon: Keepa で手動確認</span>
     </div>
   );
@@ -815,6 +831,293 @@ function BulkResearch({
   );
 }
 
+// ---- かんたん検索（JAN・型番・商品名・写真） ----
+
+const QUICK_HISTORY_KEY = "price-gap:quick-history";
+/** 「上位をまとめて調べる」で調べる候補の数 */
+const QUICK_TOP = 3;
+
+function QuickSearch({
+  loadRakutenCredentials,
+  busy,
+  onResearch,
+}: {
+  loadRakutenCredentials: () => Promise<RakutenCredentials | null>;
+  busy: boolean;
+  onResearch: (items: JanItem[]) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [candidates, setCandidates] = useState<JanCandidate[]>([]);
+  const [searchedFor, setSearchedFor] = useState("");
+  const [message, setMessage] = useState("");
+  const [working, setWorking] = useState(false);
+  const [history, setHistory] = useState<string[]>(() => loadJson<string[]>(QUICK_HISTORY_KEY) ?? []);
+  const [photoAi, setPhotoAi] = useState(false);
+  useEffect(() => saveJson(QUICK_HISTORY_KEY, history), [history]);
+  useEffect(() => {
+    fetch("/api/status", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((s) => setPhotoAi(!!s?.photoAi))
+      .catch(() => {});
+  }, []);
+
+  const remember = (q: string) => setHistory((prev) => [q, ...prev.filter((h) => h !== q)].slice(0, 10));
+
+  /** 型番・商品名から JAN の候補を探す（Yahoo! はサーバー、楽天はブラウザから。両方の結果をまとめる） */
+  async function findCandidates(keyword: string): Promise<{ list: JanCandidate[]; errors: string[] }> {
+    const errors: string[] = [];
+    const yahoo = fetch("/api/jan-search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keyword }) })
+      .then(async (res) => {
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error ?? `Yahoo!: 検索に失敗しました（HTTP ${res.status}）。`);
+        return body.items as JanCandidate[];
+      })
+      .catch((e: Error) => {
+        errors.push(e.message);
+        return [] as JanCandidate[];
+      });
+    const rakuten = loadRakutenCredentials().then(async (creds) => {
+      if (!creds) return [] as JanCandidate[];
+      const result = await fetchRakuten({ keyword }, creds, window.location.origin);
+      if ("error" in result) {
+        errors.push(result.error);
+        return [] as JanCandidate[];
+      }
+      return findJansByKeyword(result.offers, keyword);
+    });
+    const [y, r] = await Promise.all([yahoo, rakuten]);
+    return { list: mergeCandidates(y, r), errors };
+  }
+
+  /** 入力（1 行なら候補を出す・複数行ならまとめて調べる） */
+  async function search(input = query) {
+    const lines = input
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return;
+    setWorking(true);
+    setCandidates([]);
+    try {
+      if (lines.length === 1) {
+        const line = lines[0];
+        remember(line);
+        // JAN（文章の中の JAN も）ならすぐ調べる
+        const jan = normalizeJan(line) ?? extractJans(line)[0];
+        if (jan) {
+          setMessage(`JAN ${jan} を調べます。`);
+          onResearch([{ jan }]);
+          return;
+        }
+        setMessage(`「${line}」で楽天・Yahoo! を検索しています…`);
+        const { list, errors } = await findCandidates(line);
+        setCandidates(list);
+        setSearchedFor(line);
+        setMessage(
+          list.length > 0
+            ? `「${line}」で JAN が分かる商品 ${list.length} 件。型番が一致する商品・付属品でない商品を上に並べています。`
+            : `「${line}」で JAN が分かる新品が見つかりませんでした。${errors.join(" ")}`,
+        );
+        return;
+      }
+
+      // 複数行: JAN はそのまま、型番・商品名は一番それらしい候補を自動で選んでまとめて調べる
+      const picked: JanItem[] = [];
+      const unresolved: string[] = [];
+      for (const [i, line] of lines.entries()) {
+        const jan = normalizeJan(line) ?? extractJans(line)[0];
+        if (jan) {
+          picked.push({ jan });
+          continue;
+        }
+        setMessage(`型番・商品名から JAN を探しています（${i + 1}/${lines.length}）: ${line}`);
+        const best = bestCandidate((await findCandidates(line)).list);
+        if (best) picked.push({ jan: best.jan, name: line });
+        else unresolved.push(line);
+        await wait(MIN_GAP_MS);
+      }
+      const unique = mergeJanItems([], picked);
+      setMessage(
+        `${unique.length} 件を調べます。` + (unresolved.length > 0 ? ` JAN が見つからなかった行: ${unresolved.join("、")}（1 行ずつ検索すると候補を選べます）` : ""),
+      );
+      if (unique.length > 0) onResearch(unique);
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  /** 写真: バーコードをスマホの中で読み、読めなければ AI で商品名・型番を読み取って検索する */
+  async function handlePhoto(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setWorking(true);
+    setCandidates([]);
+    try {
+      setMessage("写真のバーコードを読み取っています…");
+      const img = await loadImage(file);
+      const jan = await decodeJanFromImage(img);
+      if (jan) {
+        setQuery(jan);
+        remember(jan);
+        setMessage(`バーコードから JAN ${jan} を読み取りました。調べます。`);
+        onResearch([{ jan }]);
+        return;
+      }
+      if (!photoAi) {
+        setMessage(
+          "バーコードが見つかりませんでした。バーコードを大きく写して撮り直すか、型番・商品名を入力してください（ANTHROPIC_API_KEY を登録すると、箱やスクショの写真から AI で商品名・型番を読み取れます）。",
+        );
+        return;
+      }
+      setMessage("バーコードが見つからないので、AI で商品名・型番を読み取っています…");
+      const res = await fetch("/api/photo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: toUploadDataUrl(img) }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        setMessage(body.error ?? `写真を読み取れませんでした（HTTP ${res.status}）。`);
+        return;
+      }
+      const read = body as { jan?: string; model?: string; name?: string; query?: string };
+      const found = [read.model && `型番 ${read.model}`, read.name && `商品名 ${read.name}`].filter(Boolean).join("・");
+      if (read.jan) {
+        setQuery(read.jan);
+        remember(read.jan);
+        setMessage(`写真から JAN ${read.jan} を読み取りました${found ? `（${found}）` : ""}。調べます。`);
+        onResearch([{ jan: read.jan, name: read.name }]);
+        return;
+      }
+      if (!read.query) {
+        setMessage("写真から商品を読み取れませんでした。型番・商品名を入力してください。");
+        return;
+      }
+      setQuery(read.query);
+      setMessage(`写真から読み取りました（${found}）。検索します…`);
+      setWorking(false);
+      await search(read.query);
+    } catch (err) {
+      console.error("photo search failed:", err);
+      setMessage("写真を読み込めませんでした。別の写真で試してください。");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  const research = (list: JanCandidate[]) => onResearch(list.map((c) => ({ jan: c.jan, name: c.title.slice(0, 60) })));
+  const topPicks = candidates.filter((c) => !c.accessory).slice(0, QUICK_TOP);
+
+  return (
+    <section className="space-y-3 rounded-lg border-2 border-foreground/20 p-4">
+      <h2 className="font-semibold">かんたん検索</h2>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void search();
+        }}
+        className="space-y-2"
+      >
+        <textarea
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            // 1 行のときは Enter で検索（改行は Shift+Enter）
+            if (e.key === "Enter" && !e.shiftKey && !query.includes("\n") && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              void search();
+            }
+          }}
+          rows={query.includes("\n") ? 4 : 1}
+          enterKeyHint="search"
+          placeholder="JAN・型番・商品名（例: ZV-E10 / 4902370548495）"
+          className="w-full resize-none rounded-lg border border-black/20 bg-transparent p-3 text-base dark:border-white/25"
+        />
+        <div className="grid grid-cols-2 gap-2">
+          <button type="submit" disabled={busy || working || query.trim() === ""} className={PRIMARY}>
+            検索
+          </button>
+          <label className={`${SECONDARY} cursor-pointer ${busy || working ? "pointer-events-none opacity-40" : ""}`}>
+            📷 写真で探す
+            <input type="file" accept="image/*" onChange={(e) => void handlePhoto(e)} className="sr-only" disabled={busy || working} />
+          </label>
+        </div>
+      </form>
+      <p className="text-xs opacity-60">
+        JAN はそのまま調べます。型番・商品名は楽天・Yahoo! から JAN の候補を探します（複数行で入れると、それぞれ一番それらしい商品をまとめて調べます）。
+        写真はバーコードを読み取ります{photoAi ? "。バーコードがなければ箱・値札・スクショの文字を AI で読み取ります" : ""}。
+      </p>
+
+      {history.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="opacity-60">履歴:</span>
+          {history.map((h) => (
+            <button
+              key={h}
+              type="button"
+              disabled={busy || working}
+              onClick={() => {
+                setQuery(h);
+                void search(h);
+              }}
+              className="min-h-9 max-w-[12rem] truncate rounded-full border border-black/20 px-3 disabled:opacity-40 dark:border-white/25"
+            >
+              {h}
+            </button>
+          ))}
+          <button type="button" onClick={() => setHistory([])} className="min-h-9 px-2 underline opacity-50">
+            消す
+          </button>
+        </div>
+      )}
+
+      {message && (
+        <p className="text-sm" role="status">
+          {working && <span className="mr-1 inline-block animate-pulse">●</span>}
+          {message}
+        </p>
+      )}
+
+      {candidates.length > 0 && (
+        <div className="space-y-2">
+          {topPicks.length > 1 && (
+            <button type="button" disabled={busy} onClick={() => research(topPicks)} className={`${SECONDARY} w-full`}>
+              上位 {topPicks.length} 件をまとめて調べる
+            </button>
+          )}
+          <ul className="max-h-[28rem] divide-y divide-black/10 overflow-y-auto rounded-lg border border-black/10 dark:divide-white/15 dark:border-white/15">
+            {candidates.map((c, i) => (
+              <li key={c.jan} className={`flex items-center gap-3 px-3 py-2 ${i === 0 && !c.accessory ? "bg-green-600/10" : ""}`}>
+                {c.imageUrl && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={c.imageUrl} alt="" loading="lazy" className="h-12 w-12 shrink-0 rounded object-contain" />
+                )}
+                <div className="min-w-0 flex-1 text-sm">
+                  <div className="line-clamp-2 break-words">{c.title}</div>
+                  <div className="flex flex-wrap gap-x-2 text-xs opacity-80">
+                    {c.modelMatch && <span className="font-semibold text-green-700 dark:text-green-400">✓ 型番一致</span>}
+                    {c.accessory && <span className="font-semibold text-amber-700 dark:text-amber-400">付属品かも</span>}
+                    <span>最安 {yen.format(c.minPriceJpy)}</span>
+                    <span className="opacity-70">
+                      {[c.malls.rakuten && `楽天 ${c.malls.rakuten}`, c.malls.yahoo && `Yahoo! ${c.malls.yahoo}`].filter(Boolean).join("・")}件
+                    </span>
+                    <span className="font-mono opacity-60">{c.jan}</span>
+                  </div>
+                </div>
+                <button type="button" disabled={busy} onClick={() => research([c])} className={`${i === 0 && !c.accessory ? PRIMARY : SECONDARY} shrink-0 !text-sm`}>
+                  調べる
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs opacity-60">「{searchedFor}」の検索結果（新品・JAN が分かるものだけ）</p>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // ---- JAN を追加（貼り付け・CSV） ----
 
 function AddJans({ onAdd, onAddAndRun, busy }: { onAdd: (items: JanItem[]) => void; onAddAndRun: (items: JanItem[]) => void; busy: boolean }) {
@@ -836,8 +1139,14 @@ function AddJans({ onAdd, onAddAndRun, busy }: { onAdd: (items: JanItem[]) => vo
   };
 
   return (
-    <section className="space-y-3 rounded-lg border border-black/10 p-4 dark:border-white/15">
-      <h2 className="font-semibold">JAN を追加</h2>
+    <details className="group rounded-lg border border-black/10 dark:border-white/15">
+      <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-2 px-4 py-2 [&::-webkit-details-marker]:hidden">
+        <span className="font-semibold">まとめて登録（JAN の貼り付け・CSV）</span>
+        <span aria-hidden className="text-sm opacity-70 transition-transform group-open:rotate-180">
+          ▼
+        </span>
+      </summary>
+      <div className="space-y-3 border-t border-black/10 p-4 dark:border-white/15">
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -905,11 +1214,12 @@ function AddJans({ onAdd, onAddAndRun, busy }: { onAdd: (items: JanItem[]) => vo
           </div>
         </div>
       )}
-    </section>
+      </div>
+    </details>
   );
 }
 
-// ---- JAN を探す（キーワード・楽天ランキング） ----
+// ---- 売れ筋ランキングから探す（楽天） ----
 
 type Found = { jan: string; title: string; imageUrl?: string; note: string };
 
@@ -924,7 +1234,6 @@ function Discover({
   loadRakutenCredentials: () => Promise<RakutenCredentials | null>;
   busy: boolean;
 }) {
-  const [keyword, setKeyword] = useState("");
   const [genreId, setGenreId] = useState(RANKING_GENRES[1].id);
   const [found, setFound] = useState<Found[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -936,34 +1245,6 @@ function Discover({
     setFound(list);
     setSelected(new Set(list.filter((f) => !known.has(f.jan)).map((f) => f.jan)));
     setMessage(note);
-  }
-
-  async function searchKeyword(e: React.FormEvent) {
-    e.preventDefault();
-    const direct = normalizeJan(keyword);
-    if (direct) {
-      onAdd([{ jan: direct }]);
-      setKeyword("");
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await fetch("/api/jan-search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keyword }) });
-      const body = await res.json();
-      if (!res.ok) {
-        show([], body.error ?? `検索に失敗しました（HTTP ${res.status}）。`);
-        return;
-      }
-      const items = body.items as JanCandidate[];
-      show(
-        items.map((c) => ({ jan: c.jan, title: c.title, imageUrl: c.imageUrl, note: `Yahoo! ${c.count}件・最安 ${yen.format(c.minPriceJpy)}` })),
-        `Yahoo!ショッピングで「${keyword}」の新品を探し、JAN が分かる商品 ${items.length} 件が見つかりました。`,
-      );
-    } catch {
-      show([], "サーバーに接続できませんでした。");
-    } finally {
-      setLoading(false);
-    }
   }
 
   async function loadRanking() {
@@ -1003,24 +1284,12 @@ function Discover({
   return (
     <details className="group rounded-lg border border-black/10 dark:border-white/15">
       <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-2 px-4 py-2 [&::-webkit-details-marker]:hidden">
-        <span className="font-semibold">JAN を探す（キーワード・売れ筋ランキング）</span>
+        <span className="font-semibold">売れ筋ランキングから探す（楽天）</span>
         <span aria-hidden className="text-sm opacity-70 transition-transform group-open:rotate-180">
           ▼
         </span>
       </summary>
       <div className="space-y-3 border-t border-black/10 p-4 text-sm dark:border-white/15">
-        <form onSubmit={searchKeyword} className="flex gap-2">
-          <input
-            type="search"
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            placeholder="商品名・型番（JAN ならそのまま追加）"
-            className={`${INPUT_CLASS} flex-1`}
-          />
-          <button type="submit" disabled={loading || keyword.trim() === ""} className={SECONDARY}>
-            探す
-          </button>
-        </form>
         <div className="flex gap-2">
           <select value={genreId} onChange={(e) => setGenreId(e.target.value)} className={`${INPUT_CLASS} flex-1`} aria-label="ランキングのジャンル">
             {RANKING_GENRES.map((g) => (
